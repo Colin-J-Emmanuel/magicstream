@@ -4,7 +4,7 @@ A full-stack movie streaming app with AI-ranked reviews and personalized recomme
 
 **Stack:** Go (Gin) · MongoDB · React · OpenAI-compatible LLM (Groq free tier) · Docker Compose
 
-> **Status:** 🚧 In active development. The backend foundation (server, database connection, data model) is complete and tested. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
+> **Status:** 🚧 In active development. The backend foundation (server, database connection, data model, seeding) is complete and tested. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
 
 ---
 
@@ -61,7 +61,10 @@ docker compose up -d
 cd server
 cp .env.example .env        # then add your LLM_API_KEY
 
-# 3. Run the API
+# 3. Load sample movies (safe to re-run)
+go run ./cmd/seed
+
+# 4. Run the API
 go run .
 ```
 
@@ -112,6 +115,11 @@ magicstream/
 ├── client/                   # React app (Phase 5)
 └── server/
     ├── main.go               # Entry point: config, DB connection, indexes, routes
+    ├── cmd/
+    │   └── seed/
+    │       └── main.go       # Idempotent seed script: go run ./cmd/seed
+    ├── seed/
+    │   └── movies.json       # Catalog data owned by the seed script
     ├── database/
     │   └── database.go       # Mongo connection (fail-fast ping) and index setup
     ├── models/
@@ -153,6 +161,14 @@ Genres are small, rarely change, and are always read together with their movie. 
 
 ### Ranking stores both a value and a name
 `ranking_value` (1 = Excellent … 5 = Terrible) exists so recommendations can be **sorted in the database**. MongoDB can only sort by a stored field, so mapping names to numbers in Go would mean fetching every matching movie and sorting in application code. `ranking_name` is for display. Unranked movies get a sentinel value of `999` so they sort last.
+
+### Seeding is idempotent, with split field ownership
+The seed script upserts each movie by `imdb_id`, so it can run any number of times: new movies are inserted, edited catalog data is updated, and unchanged movies are left alone. The key decision is **who owns each field**:
+
+- **Catalog fields** (`title`, `poster_path`, `youtube_id`, `genre`) are owned by `seed/movies.json` and written with `$set` on every run.
+- **Review fields** (`admin_review`, `ranking`) are owned by the app and written with `$setOnInsert`, only when a movie is first created.
+
+A naive seed that overwrites whole documents would wipe every admin review on the next reseed. Splitting ownership lets the seed file stay the source of truth for the catalog without ever touching work done through the app.
 
 ---
 
@@ -200,6 +216,20 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | Restart server | Starts cleanly (index creation is idempotent) | ✅ |
 | Insert duplicate `imdb_id` | `E11000 duplicate key error` | ✅ |
 
+### Phase 1c — Idempotent seed script ✅
+
+- `cmd/seed`: a second executable in the same module, reusing the `database` and `models` packages
+- Upsert by `imdb_id`; `$set` for catalog fields, `$setOnInsert` for review fields
+- Reports inserted / updated / unchanged counts per run
+
+| Test | Expected | Result |
+|---|---|---|
+| First run | `8 inserted, 0 updated, 0 unchanged` | ✅ |
+| Second run (idempotency) | `0 inserted, 0 updated, 8 unchanged` | ✅ |
+| Set an admin review, then reseed | Review and ranking survive | ✅ |
+| Edit one title in the seed file, reseed | `0 inserted, 1 updated, 7 unchanged` | ✅ |
+| Revert the title, reseed | `0 inserted, 1 updated, 7 unchanged` | ✅ |
+
 ---
 
 ## Roadmap
@@ -207,7 +237,7 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundation: server, Docker Compose MongoDB, config, LLM smoke test | ✅ |
-| 1 | Data layer: connection, movie model, unique index, idempotent seeding, read endpoints | 🔨 1a–1b done |
+| 1 | Data layer: connection, movie model, unique index, idempotent seeding, read endpoints | 🔨 1a–1c done |
 | 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | ⬜ |
 | 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | ⬜ |
 | 4 | Recommendations by favorite genres, sorted by ranking | ⬜ |
