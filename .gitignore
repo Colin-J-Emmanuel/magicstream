@@ -1,3 +1,15 @@
+# Secrets
 .env
 *.env.local
+
+# Go
+*.exe
+/server/tmp/
+
+# Node / React (for Phase 5)
 node_modules/
+dist/
+
+# OS / editor
+.DS_Store
+.vscode/
