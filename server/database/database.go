@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
@@ -24,4 +25,16 @@ func Connect(uri string) (*mongo.Client, error) {
 		return nil, fmt.Errorf("pinging mongo: %w", err)
 	}
 	return client, nil
+}
+
+// EnsureIndexes creates the indexes the app relies on. Safe to run on every startup.
+func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
+	_, err := db.Collection("movies").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "imdb_id", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	if err != nil {
+		return fmt.Errorf("creating unique index on movies.imdb_id: %w", err)
+	}
+	return nil
 }

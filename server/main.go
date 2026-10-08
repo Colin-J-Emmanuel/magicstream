@@ -35,6 +35,18 @@ func main() {
 		}
 	}()
 
+	dbName := os.Getenv("DATABASE_NAME")
+	if dbName == "" {
+		log.Fatal("DATABASE_NAME is not set")
+	}
+	db := client.Database(dbName)
+
+	idxCtx, idxCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer idxCancel()
+	if err := database.EnsureIndexes(idxCtx, db); err != nil {
+		log.Fatalf("index setup failed: %v", err)
+	}
+
 	router := gin.Default()
 	if err := router.SetTrustedProxies(nil); err != nil {
 		log.Fatalf("failed to set trusted proxies: %v", err)
