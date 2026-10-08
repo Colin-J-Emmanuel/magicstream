@@ -4,7 +4,7 @@ A full-stack movie streaming app with AI-ranked reviews and personalized recomme
 
 **Stack:** Go (Gin) · MongoDB · React · OpenAI-compatible LLM (Groq free tier) · Docker Compose
 
-> **Status:** 🚧 In active development. The backend foundation (server, database connection, data model, seeding) is complete and tested. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
+> **Status:** 🚧 In active development. The data layer (server, database connection, data model, seeding, read API) is complete and tested. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
 
 ---
 
@@ -99,8 +99,8 @@ All configuration is read from environment variables (`server/.env` locally; the
 | Method | Path | Description | Status |
 |---|---|---|---|
 | `GET` | `/health` | Liveness + database reachability. `200` when healthy, `503` when MongoDB is unreachable | ✅ |
-| `GET` | `/movies` | List movies | Phase 1 |
-| `GET` | `/movies/:imdb_id` | Get one movie | Phase 1 |
+| `GET` | `/movies` | List all movies, sorted by title. Returns `[]` (never `null`) when empty | ✅ |
+| `GET` | `/movies/:imdb_id` | Get one movie. `400` if the ID isn't IMDb-shaped, `404` if not found | ✅ |
 | `POST` | `/register`, `/login`, `/logout`, `/refresh` | Authentication | Phase 2 |
 | `PATCH` | `/movies/:imdb_id/review` | Admin review → LLM ranking | Phase 3 |
 | `GET` | `/recommendations` | Movies from the user's favorite genres, best-ranked first | Phase 4 |
@@ -122,6 +122,8 @@ magicstream/
     │   └── movies.json       # Catalog data owned by the seed script
     ├── database/
     │   └── database.go       # Mongo connection (fail-fast ping) and index setup
+    ├── handlers/
+    │   └── movies.go         # Movie read endpoints
     ├── models/
     │   └── movie.go          # Movie, Genre, Ranking document types
     ├── .env.example          # Committed config template
@@ -169,6 +171,15 @@ The seed script upserts each movie by `imdb_id`, so it can run any number of tim
 - **Review fields** (`admin_review`, `ranking`) are owned by the app and written with `$setOnInsert`, only when a movie is first created.
 
 A naive seed that overwrites whole documents would wipe every admin review on the next reseed. Splitting ownership lets the seed file stay the source of truth for the catalog without ever touching work done through the app.
+
+### Handlers receive dependencies explicitly
+Each group of routes is a struct (`MovieHandler`) constructed with the collection it needs, rather than reading a global database variable. Dependencies are visible in the constructor, and a handler can be tested in isolation by passing in a test collection.
+
+### Distinct errors, generic messages
+`GET /movies/:imdb_id` distinguishes a malformed ID (`400`) from a missing movie (`404`), so clients can tell bad input from absent data. Malformed IDs are rejected before reaching MongoDB: in testing, a `400` took ~50µs against ~6ms for a `404` that queried the database. Unexpected database errors are logged in full on the server, but clients receive only a generic message, so internal details never leak.
+
+### Empty lists encode as `[]`, not `null`
+In Go, a nil slice JSON-encodes as `null`. The list handler initializes an empty slice so an empty collection returns `[]`, and the React client can always call `.map()` safely.
 
 ---
 
@@ -230,6 +241,20 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | Edit one title in the seed file, reseed | `0 inserted, 1 updated, 7 unchanged` | ✅ |
 | Revert the title, reseed | `0 inserted, 1 updated, 7 unchanged` | ✅ |
 
+### Phase 1d — Read endpoints ✅
+
+- `MovieHandler` with `List` and `Get`, constructed with its collection
+- IMDb ID format validation (`^tt\d{7,8}$`) before any database call
+- 5-second query timeouts derived from the request context
+
+| Test | Expected | Result |
+|---|---|---|
+| `GET /movies` | `200`, 8 movies sorted by title | ✅ |
+| `GET /movies/tt0111161` | `200`, full document | ✅ |
+| `GET /movies/tt9999999` | `404 movie not found` | ✅ |
+| `GET /movies/not-an-id` | `400 invalid imdb_id format` | ✅ |
+| `GET /movies` on an empty collection | `[]`, not `null` | ✅ |
+
 ---
 
 ## Roadmap
@@ -237,7 +262,7 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundation: server, Docker Compose MongoDB, config, LLM smoke test | ✅ |
-| 1 | Data layer: connection, movie model, unique index, idempotent seeding, read endpoints | 🔨 1a–1c done |
+| 1 | Data layer: connection, movie model, unique index, idempotent seeding, read endpoints | ✅ |
 | 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | ⬜ |
 | 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | ⬜ |
 | 4 | Recommendations by favorite genres, sorted by ranking | ⬜ |

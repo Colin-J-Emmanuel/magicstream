@@ -11,6 +11,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/Colin-J-Emmanuel/magicstream/server/database"
+	"github.com/Colin-J-Emmanuel/magicstream/server/handlers"
 )
 
 func main() {
@@ -62,6 +63,10 @@ func main() {
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "database": "ok"})
 	})
+
+	movieHandler := handlers.NewMovieHandler(db)
+	router.GET("/movies", movieHandler.List)
+	router.GET("/movies/:imdb_id", movieHandler.Get)
 
 	port := os.Getenv("PORT")
 	if port == "" {
