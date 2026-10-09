@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Colin-J-Emmanuel/magicstream/server/auth"
+	"github.com/Colin-J-Emmanuel/magicstream/server/models"
 )
 
 const (
@@ -42,3 +43,15 @@ func UserID(c *gin.Context) string { return c.GetString(ctxUserID) }
 
 // Role returns the authenticated user's role. Only valid behind RequireAuth.
 func Role(c *gin.Context) string { return c.GetString(ctxRole) }
+
+// RequireRole must run after RequireAuth. It rejects authenticated callers without the role.
+// If RequireAuth is missing, the role is empty and every request is rejected: it fails closed.
+func RequireRole(role models.Role) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if Role(c) != string(role) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+			return
+		}
+		c.Next()
+	}
+}

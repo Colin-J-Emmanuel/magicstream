@@ -14,6 +14,7 @@ import (
 	"github.com/Colin-J-Emmanuel/magicstream/server/database"
 	"github.com/Colin-J-Emmanuel/magicstream/server/handlers"
 	"github.com/Colin-J-Emmanuel/magicstream/server/middleware"
+	"github.com/Colin-J-Emmanuel/magicstream/server/models"
 )
 
 func main() {
@@ -85,6 +86,10 @@ func main() {
 
 	protected := router.Group("/", middleware.RequireAuth(tokens))
 	protected.GET("/me", authHandler.Me)
+
+	adminHandler := handlers.NewAdminHandler(db)
+	admin := protected.Group("/admin", middleware.RequireRole(models.RoleAdmin))
+	admin.GET("/users", adminHandler.ListUsers)
 
 	port := os.Getenv("PORT")
 	if port == "" {

@@ -4,7 +4,7 @@ A full-stack movie streaming app with AI-ranked reviews and personalized recomme
 
 **Stack:** Go (Gin) · MongoDB · React · OpenAI-compatible LLM (Groq free tier) · Docker Compose
 
-> **Status:** 🚧 In active development. The data layer (server, database connection, data model, seeding, read API) is complete and tested; authentication is in progress. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
+> **Status:** 🚧 In active development. The data layer and full authentication system (registration, JWT sessions with rotation and revocation, role-based access) are complete and tested. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
 
 ---
 
@@ -67,6 +67,9 @@ go run ./cmd/seed
 
 # 4. Run the API
 go run .
+
+# 5. (Optional) After registering an account, make it an admin
+go run ./cmd/promote -email you@example.com
 ```
 
 ### Verify
@@ -117,10 +120,11 @@ All configuration is read from environment variables (`server/.env` locally; the
 | `POST` | `/auth/refresh` | Exchange the refresh cookie for a new token pair (rotation). Reusing an old refresh token revokes the whole session | ✅ |
 | `POST` | `/auth/logout` | Revoke the session and clear both cookies. Always `204`, even with no cookie | ✅ |
 | `GET` | `/me` | 🔒 The current user, read fresh from the database. `401` without a valid access token | ✅ |
+| `GET` | `/admin/users` | 👑 All users, oldest first. `401` if not logged in, `403` if not an admin | ✅ |
 | `PATCH` | `/movies/:imdb_id/review` | Admin review → LLM ranking | Phase 3 |
 | `GET` | `/recommendations` | Movies from the user's favorite genres, best-ranked first | Phase 4 |
 
-🔒 = requires authentication.
+🔒 = requires authentication. 👑 = requires the `ADMIN` role.
 
 ---
 
@@ -136,6 +140,8 @@ magicstream/
     │   ├── tokens.go         # JWT issuing and verification, separate access/refresh secrets
     │   └── tokens_test.go    # Unit tests (expired-token rejection)
     ├── cmd/
+    │   ├── promote/
+    │   │   └── main.go       # Operator CLI to grant or revoke admin: go run ./cmd/promote
     │   └── seed/
     │       └── main.go       # Idempotent seed script: go run ./cmd/seed
     ├── seed/
@@ -143,10 +149,11 @@ magicstream/
     ├── database/
     │   └── database.go       # Mongo connection (fail-fast ping) and index setup
     ├── handlers/
+    │   ├── admin.go          # Admin-only endpoints
     │   ├── auth.go           # Register, login, refresh, logout, /me
     │   └── movies.go         # Movie read endpoints
     ├── middleware/
-    │   └── auth.go           # RequireAuth: verifies the access cookie, sets user identity
+    │   └── auth.go           # RequireAuth (identity) and RequireRole (permission)
     ├── models/
     │   ├── movie.go          # Movie, Genre, Ranking document types
     │   ├── refresh_token.go  # Server-side refresh token record (hash only)
@@ -264,6 +271,18 @@ A TTL index on `expires_at` makes MongoDB delete each refresh-token record autom
 
 ### Logout is idempotent, with an honest limit
 Logout revokes the session's whole family and clears both cookies, and it always returns `204`, because "make sure I'm logged out" should never fail. It doesn't verify the refresh JWT's signature: it hashes what it received and looks it up, so forged tokens simply match nothing, and a session can be revoked even after its JWT expires. Cookies are cleared on the same `Path` they were set with; otherwise the browser would keep them. **Limit:** an access token issued before logout remains valid until it expires (at most 15 minutes), because access tokens are verified without the database. This was tested and confirmed, and it is the deliberate cost of stateless access tokens.
+
+### `401` for identity, `403` for permission
+`401` means "I don't know who you are" (log in to fix it); `403` means "I know who you are, and you're not allowed" (logging in again won't help). Admin routes live in a group nested inside the protected group, so `RequireAuth` always runs before `RequireRole`: identity first, then permission.
+
+### Role checks fail closed
+`RequireRole` compares the role that `RequireAuth` placed on the request context. If it were ever wired up without `RequireAuth` in front, the role would be empty, match nothing, and every request would be rejected. A misconfiguration locks the route rather than opening it.
+
+### Roles come from the token, with a bounded delay
+`RequireRole` trusts the access token's `role` claim rather than querying the database on every admin request. A promotion or demotion therefore takes effect at the user's next refresh, within 15 minutes. This was tested directly: after a promotion, the old token was still refused with `403` until a refresh issued one carrying the new role. Checking the database on every admin request would make demotion instant at the cost of a query per request; the stateless approach was kept for consistency with the rest of the auth design.
+
+### The first admin is created by the operator, not over HTTP
+Nobody can register as an admin, so the first one is granted by `cmd/promote`, a CLI that requires direct database access. Alternatives were rejected deliberately: an admin signup endpoint would let anyone who discovers it become an admin, and auto-promoting a configured `ADMIN_EMAIL` at registration would hand admin to whoever registers that address first, an account-squatting risk without email verification. With the CLI, admin power can only come from someone who already controls the infrastructure. The tool is idempotent, can demote with `-role USER`, and prints the propagation delay so the operator isn't surprised.
 
 ---
 
@@ -407,6 +426,23 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | Logout with no cookies | `204` (idempotent) | ✅ |
 | Unit tests after token changes | Pass | ✅ |
 
+### Phase 2e — Role-based access ✅
+
+- `middleware.RequireRole`: `403` for authenticated callers without the role; fails closed
+- `GET /admin/users` in an admin group nested inside the protected group
+- `cmd/promote`: operator CLI to grant or revoke the admin role
+
+| Test | Expected | Result |
+|---|---|---|
+| `/admin/users` without auth | `401` | ✅ |
+| `/admin/users` as a `USER` | `403 insufficient permissions` | ✅ |
+| Promote via CLI | "is now ADMIN" plus propagation warning | ✅ |
+| Same (pre-promotion) token after promoting | Still `403`: the token is a snapshot | ✅ |
+| Refresh, then `/admin/users` | Refresh returns `role: ADMIN`; then `200` with all users, no password hashes | ✅ |
+| Promote again | "already has role ADMIN; nothing changed" | ✅ |
+| CLI: unknown email / invalid role / no arguments | Clear error, exit status 1 | ✅ |
+| Another `USER` after the promotion | Still `403` | ✅ |
+
 ---
 
 ## Roadmap
@@ -415,7 +451,7 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 |---|---|---|
 | 0 | Foundation: server, Docker Compose MongoDB, config, LLM smoke test | ✅ |
 | 1 | Data layer: connection, movie model, unique index, idempotent seeding, read endpoints | ✅ |
-| 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | 🔨 2a–2d done |
+| 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | ✅ |
 | 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | ⬜ |
 | 4 | Recommendations by favorite genres, sorted by ranking | ⬜ |
 | 5 | React client: browse, auth, trailer player, recommendations, admin review form | ⬜ |
