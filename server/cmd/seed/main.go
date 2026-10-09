@@ -62,7 +62,7 @@ func main() {
 			// Review fields: owned by the app, written only when the movie is first created.
 			"$setOnInsert": bson.M{
 				"admin_review": "",
-				"ranking":      models.Ranking{RankingValue: 999, RankingName: "Not_Ranked"},
+				"ranking":      models.Ranking{RankingValue: models.NotRankedValue, RankingName: models.NotRankedName},
 			},
 		}
 		res, err := coll.UpdateOne(ctx, bson.M{"imdb_id": m.ImdbID}, update,

@@ -13,6 +13,7 @@ import (
 	"github.com/Colin-J-Emmanuel/magicstream/server/auth"
 	"github.com/Colin-J-Emmanuel/magicstream/server/database"
 	"github.com/Colin-J-Emmanuel/magicstream/server/handlers"
+	"github.com/Colin-J-Emmanuel/magicstream/server/llm"
 	"github.com/Colin-J-Emmanuel/magicstream/server/middleware"
 	"github.com/Colin-J-Emmanuel/magicstream/server/models"
 )
@@ -75,6 +76,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("token setup failed: %v", err)
 	}
+
+	llmClient, err := llm.NewClient(os.Getenv("LLM_BASE_URL"), os.Getenv("LLM_API_KEY"), os.Getenv("LLM_MODEL"))
+	if err != nil {
+		log.Fatalf("llm setup failed: %v", err)
+	}
+
 	secureCookies := os.Getenv("COOKIE_SECURE") == "true"
 
 	authHandler := handlers.NewAuthHandler(db, tokens, secureCookies)
@@ -90,6 +97,9 @@ func main() {
 	adminHandler := handlers.NewAdminHandler(db)
 	admin := protected.Group("/admin", middleware.RequireRole(models.RoleAdmin))
 	admin.GET("/users", adminHandler.ListUsers)
+
+	reviewHandler := handlers.NewReviewHandler(db, llm.NewClassifier(llmClient))
+	admin.PATCH("/movies/:imdb_id/review", reviewHandler.Update)
 
 	port := os.Getenv("PORT")
 	if port == "" {

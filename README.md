@@ -123,7 +123,7 @@ All configuration is read from environment variables (`server/.env` locally; the
 | `POST` | `/auth/logout` | Revoke the session and clear both cookies. Always `204`, even with no cookie | ✅ |
 | `GET` | `/me` | 🔒 The current user, read fresh from the database. `401` without a valid access token | ✅ |
 | `GET` | `/admin/users` | 👑 All users, oldest first. `401` if not logged in, `403` if not an admin | ✅ |
-| `PATCH` | `/movies/:imdb_id/review` | Admin review → LLM ranking | Phase 3 |
+| `PATCH` | `/admin/movies/:imdb_id/review` | 👑 Classify a review with the LLM and save review and ranking together. `404` for an unknown movie (no LLM call made); `502`/`503`/`504` if the LLM fails, with nothing saved | ✅ |
 | `GET` | `/recommendations` | Movies from the user's favorite genres, best-ranked first | Phase 4 |
 
 🔒 = requires authentication. 👑 = requires the `ADMIN` role.
@@ -155,7 +155,8 @@ magicstream/
     ├── handlers/
     │   ├── admin.go          # Admin-only endpoints
     │   ├── auth.go           # Register, login, refresh, logout, /me
-    │   └── movies.go         # Movie read endpoints
+    │   ├── movies.go         # Movie read endpoints
+    │   └── reviews.go        # Admin review → LLM ranking
     ├── llm/
     │   ├── client.go         # Hand-written OpenAI-compatible chat client with retry and backoff
     │   ├── ranking.go        # Review classifier with strict output validation
@@ -324,6 +325,27 @@ An HTTP request body is a stream that is consumed when sent. Each attempt theref
 
 ### Retry timing is injected
 The delays live in a `RetryPolicy` value on the client. Production uses real delays; tests inject millisecond delays, so a scenario with three attempts runs in a few milliseconds while exercising the same code path.
+
+### Cheap checks before the expensive one
+The review endpoint validates the IMDb ID and the review text, then confirms the movie exists, and only then calls the LLM. In testing, malformed requests were rejected in under a millisecond and an unknown movie returned `404` in ~11ms, without ever spending an LLM call, against ~300–500ms for a request that needed classification.
+
+### Review and ranking are saved atomically, without a transaction
+The LLM is called before anything is written, so a failed classification leaves the movie untouched. The save itself is a single `$set` on one document, and MongoDB guarantees single-document writes are atomic: review and ranking change together or not at all. This is the earlier decision to embed related data paying off. With both fields in one document, consistency needs no transaction. Tested directly: with the provider unreachable, an attempted review update returned `503` after retries, and the movie still held its previous review and ranking.
+
+### Gateway status codes for upstream failures
+When the LLM fails, the admin's request wasn't at fault, so a `4xx` would mislead. An off-scale answer returns `502 Bad Gateway`, a timeout `504 Gateway Timeout`, and rate limits or outages `503 Service Unavailable`. A rejected API key returns `500`, because that is a misconfiguration on our side rather than a transient upstream problem. Clients get a short generic message; the server log gets the full wrapped error.
+
+### Unchanged reviews skip the LLM
+If an admin re-saves identical text for an already-ranked movie, the existing result is returned without classification. At temperature 0 the answer would be the same, so the call would only spend quota and time. In testing, a repeat save took ~5ms against ~474ms for the first.
+
+### Review length is capped
+Review text is placed in the prompt, so its length drives token cost and latency. Reviews are limited to 2,000 characters, counted as characters rather than bytes so the limit means what an admin would expect.
+
+### The LLM call is tied to the request
+Classification runs under a context derived from the incoming request, with a 25-second ceiling. If the admin's client disconnects, the LLM call and any pending retry are cancelled rather than finishing work no one will receive.
+
+### LLM configuration is checked at startup
+Like the token secrets, missing `LLM_*` variables stop the server from starting rather than failing on the first review.
 
 ---
 
@@ -540,6 +562,29 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | Invalid API key | `401 invalid_api_key` after **1** attempt, no retries ✅ |
 | Normal review | `Excellent (1)` ✅ |
 
+### Phase 3c — Review endpoint ✅
+
+- `PATCH /admin/movies/:imdb_id/review`: validate → confirm the movie exists → classify → single-document atomic save
+- LLM failures mapped to `502` / `503` / `504` / `500`; nothing written on failure
+- Unchanged, already-ranked reviews return without an LLM call
+- `models.NotRankedValue` / `NotRankedName` constants shared with the seed script
+
+**Unit tests** (`go test ./handlers/`): `classifyFailure` maps wrapped errors to `502` (off-scale), `504` (deadline), `500` (bad key), and `503` (rate-limited, unreachable) ✅
+
+**Endpoint tests** (timings from the server log)
+
+| Test | Expected | Time | Result |
+|---|---|---|---|
+| New review | `200`, ranked `Excellent` | 474ms (LLM call) | ✅ |
+| Public `GET` afterwards | Same review and ranking | 5ms | ✅ |
+| Same review again | `200`, unchanged result | **4.8ms (no LLM call)** | ✅ |
+| Changed review on another movie | `200`, ranked `Terrible` | 311ms | ✅ |
+| Blank review / missing field / 2,001 characters / bad IMDb ID | `400` each | 0.3–0.9ms | ✅ |
+| Unknown movie | `404` | **10.9ms (no LLM call)** | ✅ |
+| Provider unreachable | `503` after 3 attempts | 353ms | ✅ |
+| Movie after the failed update | Previous review and ranking intact | — | ✅ |
+| Non-admin | `403` | 0.2ms | ✅ |
+
 ---
 
 ## Roadmap
@@ -549,7 +594,7 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | 0 | Foundation: server, Docker Compose MongoDB, config, LLM smoke test | ✅ |
 | 1 | Data layer: connection, movie model, unique index, idempotent seeding, read endpoints | ✅ |
 | 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | ✅ |
-| 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | 🔨 3a–3b done |
+| 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | 🔨 3a–3c done |
 | 4 | Recommendations by favorite genres, sorted by ranking | ⬜ |
 | 5 | React client: browse, auth, trailer player, recommendations, admin review form | ⬜ |
 | 6 | Deploy: MongoDB Atlas, API on Render, client on Vercel | ⬜ |

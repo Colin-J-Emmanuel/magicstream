@@ -22,3 +22,8 @@ type Movie struct {
 	AdminReview string        `bson:"admin_review" json:"admin_review"`
 	Ranking     Ranking       `bson:"ranking" json:"ranking"`
 }
+
+const (
+	NotRankedValue = 999
+	NotRankedName  = "Not_Ranked"
+)
