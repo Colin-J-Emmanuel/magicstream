@@ -13,6 +13,7 @@ import (
 	"github.com/Colin-J-Emmanuel/magicstream/server/auth"
 	"github.com/Colin-J-Emmanuel/magicstream/server/database"
 	"github.com/Colin-J-Emmanuel/magicstream/server/handlers"
+	"github.com/Colin-J-Emmanuel/magicstream/server/middleware"
 )
 
 func main() {
@@ -79,6 +80,9 @@ func main() {
 	authRoutes := router.Group("/auth")
 	authRoutes.POST("/register", authHandler.Register)
 	authRoutes.POST("/login", authHandler.Login)
+
+	protected := router.Group("/", middleware.RequireAuth(tokens))
+	protected.GET("/me", authHandler.Me)
 
 	port := os.Getenv("PORT")
 	if port == "" {

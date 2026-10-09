@@ -14,6 +14,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/Colin-J-Emmanuel/magicstream/server/auth"
+	"github.com/Colin-J-Emmanuel/magicstream/server/middleware"
 	"github.com/Colin-J-Emmanuel/magicstream/server/models"
 )
 
@@ -144,4 +145,28 @@ func (h *AuthHandler) setAuthCookies(c *gin.Context, access, refresh string) {
 		MaxAge:   int(auth.RefreshTTL.Seconds()),
 		HttpOnly: true, Secure: h.secureCookies, SameSite: http.SameSiteLaxMode,
 	})
+}
+
+func (h *AuthHandler) Me(c *gin.Context) {
+	id, err := bson.ObjectIDFromHex(middleware.UserID(c))
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	var user models.User
+	err = h.users.FindOne(ctx, bson.M{"_id": id}).Decode(&user)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+	if err != nil {
+		log.Printf("fetching current user %s: %v", id.Hex(), err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch user"})
+		return
+	}
+	c.JSON(http.StatusOK, user)
 }

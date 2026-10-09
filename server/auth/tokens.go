@@ -53,3 +53,27 @@ func issue(userID, role string, secret []byte, ttl time.Duration) (string, error
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(secret)
 }
+
+func (tm *TokenManager) ParseAccess(token string) (*Claims, error) {
+	return parse(token, tm.accessSecret)
+}
+
+func (tm *TokenManager) ParseRefresh(token string) (*Claims, error) {
+	return parse(token, tm.refreshSecret)
+}
+
+func parse(tokenString string, secret []byte) (*Claims, error) {
+	claims := &Claims{}
+	_, err := jwt.ParseWithClaims(tokenString, claims,
+		func(t *jwt.Token) (any, error) { return secret, nil },
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}), // pin the algorithm
+		jwt.WithExpirationRequired(),                                 // no exp claim = invalid
+	)
+	if err != nil {
+		return nil, err
+	}
+	if claims.Subject == "" {
+		return nil, errors.New("token has no subject")
+	}
+	return claims, nil
+}

@@ -59,7 +59,8 @@ docker compose up -d
 
 # 2. Configure the server
 cd server
-cp .env.example .env        # then add your LLM_API_KEY
+cp .env.example .env        # then add your LLM_API_KEY and two token secrets
+                            # (generate each with: openssl rand -base64 48)
 
 # 3. Load sample movies (safe to re-run)
 go run ./cmd/seed
@@ -75,6 +76,13 @@ curl -s localhost:8080/health
 # {"database":"ok","status":"ok"}
 ```
 
+### Run unit tests
+
+```bash
+cd server
+go test ./...
+```
+
 ---
 
 ## Configuration
@@ -86,6 +94,9 @@ All configuration is read from environment variables (`server/.env` locally; the
 | `MONGODB_URI` | yes | — | MongoDB connection string |
 | `DATABASE_NAME` | yes | — | Database name (`magicstream`) |
 | `PORT` | no | `8080` | HTTP port (set automatically by Render) |
+| `ACCESS_TOKEN_SECRET` | yes | — | Signs access tokens. At least 32 characters |
+| `REFRESH_TOKEN_SECRET` | yes | — | Signs refresh tokens. At least 32 characters, and must differ from the access secret |
+| `COOKIE_SECURE` | no | `false` | Set `true` in production so auth cookies are sent only over HTTPS |
 | `LLM_API_KEY` | yes* | — | API key for the LLM provider |
 | `LLM_BASE_URL` | yes* | — | OpenAI-compatible endpoint, e.g. `https://api.groq.com/openai/v1` |
 | `LLM_MODEL` | yes* | — | Model name, e.g. `openai/gpt-oss-20b` |
@@ -101,10 +112,14 @@ All configuration is read from environment variables (`server/.env` locally; the
 | `GET` | `/health` | Liveness + database reachability. `200` when healthy, `503` when MongoDB is unreachable | ✅ |
 | `GET` | `/movies` | List all movies, sorted by title. Returns `[]` (never `null`) when empty | ✅ |
 | `GET` | `/movies/:imdb_id` | Get one movie. `400` if the ID isn't IMDb-shaped, `404` if not found | ✅ |
-| `POST` | `/register` | Create an account. `201` on success, `400` on invalid input, `409` if the email is taken | ✅ |
-| `POST` | `/login`, `/logout`, `/refresh` | Session management | Phase 2 |
+| `POST` | `/auth/register` | Create an account. `201` on success, `400` on invalid input, `409` if the email is taken | ✅ |
+| `POST` | `/auth/login` | Verify credentials and set `access_token` / `refresh_token` http-only cookies. `401` with one generic message for any bad credentials | ✅ |
+| `POST` | `/auth/refresh`, `/auth/logout` | Rotate tokens; revoke the session | Phase 2 |
+| `GET` | `/me` | 🔒 The current user, read fresh from the database. `401` without a valid access token | ✅ |
 | `PATCH` | `/movies/:imdb_id/review` | Admin review → LLM ranking | Phase 3 |
 | `GET` | `/recommendations` | Movies from the user's favorite genres, best-ranked first | Phase 4 |
+
+🔒 = requires authentication.
 
 ---
 
@@ -116,6 +131,9 @@ magicstream/
 ├── client/                   # React app (Phase 5)
 └── server/
     ├── main.go               # Entry point: config, DB connection, indexes, routes
+    ├── auth/
+    │   ├── tokens.go         # JWT issuing and verification, separate access/refresh secrets
+    │   └── tokens_test.go    # Unit tests (expired-token rejection)
     ├── cmd/
     │   └── seed/
     │       └── main.go       # Idempotent seed script: go run ./cmd/seed
@@ -124,8 +142,10 @@ magicstream/
     ├── database/
     │   └── database.go       # Mongo connection (fail-fast ping) and index setup
     ├── handlers/
-    │   ├── auth.go           # Registration (login and sessions to follow)
+    │   ├── auth.go           # Registration and login
     │   └── movies.go         # Movie read endpoints
+    ├── middleware/
+    │   └── auth.go           # RequireAuth: verifies the access cookie, sets user identity
     ├── models/
     │   ├── movie.go          # Movie, Genre, Ranking document types
     │   └── user.go           # User document and RegisterRequest
@@ -195,6 +215,36 @@ Registration decodes into `RegisterRequest`, a separate type with no `Role` fiel
 
 ### Email uniqueness is the database's job
 Emails are lowercased and trimmed, then inserted directly. A unique index rejects duplicates, and the duplicate-key error becomes a `409`. Checking for an existing email before inserting would be racy (two simultaneous signups can both pass the check), so the index is the only source of truth. The trade-off: a duplicate signup still pays for a bcrypt hash before the insert fails, an acceptable cost for race-free code on a rare path.
+
+### Two tokens: short-lived access, revocable refresh
+An access token (15 minutes) is verified by its signature alone, with no database lookup, which makes every authenticated request cheap. The cost is that it can't be revoked before it expires, so its lifetime is kept short. A refresh token (7 days) is used only to obtain new access tokens, and will be checked against the database so it can be revoked on logout.
+
+### JWTs carry only what is safe to read
+A JWT is signed, not encrypted: anyone holding one can decode its payload. The signature only prevents *changes*. So the payload holds just the user ID, role, and timestamps. No email, no password hash, nothing sensitive.
+
+### Separate secrets for access and refresh tokens
+If both token types shared one signing key, a stolen 7-day refresh token would also pass as an access token. With separate secrets, that confusion is cryptographically impossible: no runtime "token type" check needs to be remembered. The server refuses to start if either secret is missing, shorter than 32 characters, or identical to the other.
+
+### Login reveals nothing about which accounts exist
+An unknown email and a wrong password both return the same `401 invalid email or password`. Because a wrong password costs ~350ms of bcrypt while a missing account would otherwise return instantly, the handler also runs bcrypt against a dummy hash when the email isn't found. In testing, the two cases took 340ms and 346ms: indistinguishable by message or by timing. (Registration's `409` does reveal whether an email is taken, a common trade-off for signup UX.)
+
+### Tokens live in http-only cookies with a narrow refresh path
+Tokens are set as `HttpOnly` cookies so injected JavaScript can never read them, unlike `localStorage`. `SameSite=Lax` is a first layer of CSRF defense, and `Secure` is enabled in production. The refresh cookie's `Path` is `/auth`, so the long-lived token is sent only to authentication routes, never with ordinary requests like `/movies`.
+
+### Tokens get no say in how they're verified
+A JWT's header declares its own signing algorithm, and early libraries trusted it: an attacker could set `"alg": "none"`, drop the signature, and be accepted. Verification here pins the algorithm to HS256 and supplies the key itself, ignoring whatever the token claims. An expiry claim is also required, so a token minted without one is rejected rather than treated as valid forever. All three attack paths were tested, and each was caught by a different defense: a tampered payload by the signature check, `alg: none` by the algorithm pin, and a refresh token posing as an access token by the separate secrets.
+
+### Protection is applied by route group, not per route
+`RequireAuth` is attached to a route group, and protected endpoints are registered on that group. A new protected endpoint can't accidentally ship without the middleware. The middleware stops the chain with `AbortWithStatusJSON`, so a rejected request can never fall through to the handler.
+
+### Handlers never touch tokens
+The middleware verifies the token and stores the user ID and role on the request context; handlers read them through `middleware.UserID(c)` and `middleware.Role(c)`. Token handling lives in exactly one place.
+
+### `/me` reads the database, not the token
+A JWT is a snapshot taken at login: a role changed or an account deleted since then isn't reflected in it. `/me` uses the token only to identify the caller, then loads the current user from MongoDB. A deleted account gets a `401`.
+
+### One response for every authentication failure
+A missing cookie, a bad signature, a forged algorithm, and an expired token all return the same `401 authentication required`. The specific reason is logged on the server for debugging; a client probing the API learns nothing about which check it failed.
 
 ---
 
@@ -286,6 +336,38 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | Missing required fields | `400`, lists each missing field | ✅ |
 | Stored hash | Begins `$2a$12$` | ✅ |
 
+### Phase 2b — Login ✅
+
+- `auth.TokenManager`: HS256 JWTs with separate access/refresh secrets, validated at startup
+- `POST /auth/login`: generic error message, timing equalized with a dummy bcrypt hash
+- Auth routes grouped under `/auth`; tokens set as `HttpOnly`, `SameSite=Lax` cookies
+
+| Test | Expected | Result |
+|---|---|---|
+| Start with a short secret | Server refuses to start with a clear error | ✅ |
+| `POST /register` (old path) | `404` | ✅ |
+| Valid login | `200` and two cookies | ✅ |
+| Cookie attributes | Both `HttpOnly`, `SameSite=Lax`; access `Path=/`, 15 min; refresh `Path=/auth`, 7 days | ✅ |
+| Wrong password | `401 invalid email or password` (~340ms) | ✅ |
+| Unknown email | Same `401` message, same timing (~346ms) | ✅ |
+| Decode access token payload | Only `sub`, `role`, `iat`, `exp`; `exp − iat` = 900s | ✅ |
+
+### Phase 2c — Auth middleware ✅
+
+- `TokenManager.ParseAccess` / `ParseRefresh`: HS256 pinned, expiry required
+- `middleware.RequireAuth`: reads the `access_token` cookie, verifies it, sets user ID and role on the context
+- Protected route group with `GET /me`
+- First unit test: `go test ./auth/`
+
+| Test | Expected | Server log reason | Result |
+|---|---|---|---|
+| No cookie | `401` | (not logged: ordinary anonymous traffic) | ✅ |
+| Valid token | `200`, current user, no `password_hash` | — | ✅ |
+| Payload tampered to `role: ADMIN` | `401` | `token signature is invalid` | ✅ |
+| Header forged to `alg: none`, signature removed | `401` | `signing method none is invalid` | ✅ |
+| Refresh token sent as access token | `401` | `token signature is invalid` | ✅ |
+| Expired token (unit test) | `ErrTokenExpired` | — | ✅ |
+
 ---
 
 ## Roadmap
@@ -294,7 +376,7 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 |---|---|---|
 | 0 | Foundation: server, Docker Compose MongoDB, config, LLM smoke test | ✅ |
 | 1 | Data layer: connection, movie model, unique index, idempotent seeding, read endpoints | ✅ |
-| 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | 🔨 2a done |
+| 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | 🔨 2a–2c done |
 | 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | ⬜ |
 | 4 | Recommendations by favorite genres, sorted by ranking | ⬜ |
 | 5 | React client: browse, auth, trailer player, recommendations, admin review form | ⬜ |
