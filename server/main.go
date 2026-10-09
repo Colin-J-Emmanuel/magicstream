@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 
+	"github.com/Colin-J-Emmanuel/magicstream/server/auth"
 	"github.com/Colin-J-Emmanuel/magicstream/server/database"
 	"github.com/Colin-J-Emmanuel/magicstream/server/handlers"
 )
@@ -68,8 +69,16 @@ func main() {
 	router.GET("/movies", movieHandler.List)
 	router.GET("/movies/:imdb_id", movieHandler.Get)
 
-	authHandler := handlers.NewAuthHandler(db)
-	router.POST("/register", authHandler.Register)
+	tokens, err := auth.NewTokenManager(os.Getenv("ACCESS_TOKEN_SECRET"), os.Getenv("REFRESH_TOKEN_SECRET"))
+	if err != nil {
+		log.Fatalf("token setup failed: %v", err)
+	}
+	secureCookies := os.Getenv("COOKIE_SECURE") == "true"
+
+	authHandler := handlers.NewAuthHandler(db, tokens, secureCookies)
+	authRoutes := router.Group("/auth")
+	authRoutes.POST("/register", authHandler.Register)
+	authRoutes.POST("/login", authHandler.Login)
 
 	port := os.Getenv("PORT")
 	if port == "" {

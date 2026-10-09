@@ -13,3 +13,5 @@ dist/
 # OS / editor
 .DS_Store
 .vscode/
+
+cookies.txt
