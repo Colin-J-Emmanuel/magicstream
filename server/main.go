@@ -68,6 +68,9 @@ func main() {
 	router.GET("/movies", movieHandler.List)
 	router.GET("/movies/:imdb_id", movieHandler.Get)
 
+	authHandler := handlers.NewAuthHandler(db)
+	router.POST("/register", authHandler.Register)
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"

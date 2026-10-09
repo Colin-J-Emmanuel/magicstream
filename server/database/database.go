@@ -36,5 +36,14 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 	if err != nil {
 		return fmt.Errorf("creating unique index on movies.imdb_id: %w", err)
 	}
+
+	_, err = db.Collection("users").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "email", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	if err != nil {
+		return fmt.Errorf("creating unique index on users.email: %w", err)
+	}
+
 	return nil
 }

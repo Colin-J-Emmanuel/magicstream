@@ -4,7 +4,7 @@ A full-stack movie streaming app with AI-ranked reviews and personalized recomme
 
 **Stack:** Go (Gin) · MongoDB · React · OpenAI-compatible LLM (Groq free tier) · Docker Compose
 
-> **Status:** 🚧 In active development. The data layer (server, database connection, data model, seeding, read API) is complete and tested. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
+> **Status:** 🚧 In active development. The data layer (server, database connection, data model, seeding, read API) is complete and tested; authentication is in progress. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
 
 ---
 
@@ -101,7 +101,8 @@ All configuration is read from environment variables (`server/.env` locally; the
 | `GET` | `/health` | Liveness + database reachability. `200` when healthy, `503` when MongoDB is unreachable | ✅ |
 | `GET` | `/movies` | List all movies, sorted by title. Returns `[]` (never `null`) when empty | ✅ |
 | `GET` | `/movies/:imdb_id` | Get one movie. `400` if the ID isn't IMDb-shaped, `404` if not found | ✅ |
-| `POST` | `/register`, `/login`, `/logout`, `/refresh` | Authentication | Phase 2 |
+| `POST` | `/register` | Create an account. `201` on success, `400` on invalid input, `409` if the email is taken | ✅ |
+| `POST` | `/login`, `/logout`, `/refresh` | Session management | Phase 2 |
 | `PATCH` | `/movies/:imdb_id/review` | Admin review → LLM ranking | Phase 3 |
 | `GET` | `/recommendations` | Movies from the user's favorite genres, best-ranked first | Phase 4 |
 
@@ -123,9 +124,11 @@ magicstream/
     ├── database/
     │   └── database.go       # Mongo connection (fail-fast ping) and index setup
     ├── handlers/
+    │   ├── auth.go           # Registration (login and sessions to follow)
     │   └── movies.go         # Movie read endpoints
     ├── models/
-    │   └── movie.go          # Movie, Genre, Ranking document types
+    │   ├── movie.go          # Movie, Genre, Ranking document types
+    │   └── user.go           # User document and RegisterRequest
     ├── .env.example          # Committed config template
     ├── go.mod
     └── go.sum
@@ -180,6 +183,18 @@ Each group of routes is a struct (`MovieHandler`) constructed with the collectio
 
 ### Empty lists encode as `[]`, not `null`
 In Go, a nil slice JSON-encodes as `null`. The list handler initializes an empty slice so an empty collection returns `[]`, and the React client can always call `.map()` safely.
+
+### Passwords are hashed with bcrypt at cost 12
+Passwords are hashed, never encrypted: a hash can't be reversed, only checked against a guess. bcrypt is deliberately slow (~350ms per hash at cost 12) and automatically salted, which makes brute-forcing a stolen database impractical and precomputed lookup tables useless. bcrypt only reads the first 72 *bytes* of a password, while validation counts *characters*, so passwords over 72 bytes are rejected explicitly rather than silently truncated.
+
+### Password hashes can never appear in a response
+`User.PasswordHash` carries the struct tag `json:"-"`, so it is excluded from JSON encoding entirely. Even a handler that returns a whole `User` cannot leak it: the guarantee lives in the type, not in each handler remembering to strip it.
+
+### Clients cannot assign themselves a role
+Registration decodes into `RegisterRequest`, a separate type with no `Role` field. A client that sends `"role": "ADMIN"` is ignored, and the server always sets `USER`. This closes the mass-assignment vulnerability structurally: the attack can't be expressed, rather than being checked for at runtime.
+
+### Email uniqueness is the database's job
+Emails are lowercased and trimmed, then inserted directly. A unique index rejects duplicates, and the duplicate-key error becomes a `409`. Checking for an existing email before inserting would be racy (two simultaneous signups can both pass the check), so the index is the only source of truth. The trade-off: a duplicate signup still pays for a bcrypt hash before the insert fails, an acceptable cost for race-free code on a rare path.
 
 ---
 
@@ -255,6 +270,22 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | `GET /movies/not-an-id` | `400 invalid imdb_id format` | ✅ |
 | `GET /movies` on an empty collection | `[]`, not `null` | ✅ |
 
+### Phase 2a — Registration ✅
+
+- `User` model with a hidden password hash; separate `RegisterRequest` with validation tags
+- Unique index on `users.email`, created at startup alongside the movies index
+- `POST /register`: validate, hash with bcrypt (cost 12), normalize email, insert
+
+| Test | Expected | Result |
+|---|---|---|
+| Valid registration | `201`, email lowercased, role `USER`, no `password_hash` in body (~350ms) | ✅ |
+| Same email, different case | `409` | ✅ |
+| Body includes `"role":"ADMIN"` | `201` with role `USER` | ✅ |
+| Password under 8 characters | `400`, fails `min` tag | ✅ |
+| Malformed email | `400`, fails `email` tag | ✅ |
+| Missing required fields | `400`, lists each missing field | ✅ |
+| Stored hash | Begins `$2a$12$` | ✅ |
+
 ---
 
 ## Roadmap
@@ -263,7 +294,7 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 |---|---|---|
 | 0 | Foundation: server, Docker Compose MongoDB, config, LLM smoke test | ✅ |
 | 1 | Data layer: connection, movie model, unique index, idempotent seeding, read endpoints | ✅ |
-| 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | ⬜ |
+| 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | 🔨 2a done |
 | 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | ⬜ |
 | 4 | Recommendations by favorite genres, sorted by ranking | ⬜ |
 | 5 | React client: browse, auth, trailer player, recommendations, admin review form | ⬜ |
