@@ -45,5 +45,14 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 		return fmt.Errorf("creating unique index on users.email: %w", err)
 	}
 
+	_, err = db.Collection("refresh_tokens").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "token_hash", Value: 1}}, Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "family_id", Value: 1}}},
+		{Keys: bson.D{{Key: "expires_at", Value: 1}}, Options: options.Index().SetExpireAfterSeconds(0)},
+	})
+	if err != nil {
+		return fmt.Errorf("creating refresh_tokens indexes: %w", err)
+	}
+
 	return nil
 }

@@ -114,7 +114,8 @@ All configuration is read from environment variables (`server/.env` locally; the
 | `GET` | `/movies/:imdb_id` | Get one movie. `400` if the ID isn't IMDb-shaped, `404` if not found | ✅ |
 | `POST` | `/auth/register` | Create an account. `201` on success, `400` on invalid input, `409` if the email is taken | ✅ |
 | `POST` | `/auth/login` | Verify credentials and set `access_token` / `refresh_token` http-only cookies. `401` with one generic message for any bad credentials | ✅ |
-| `POST` | `/auth/refresh`, `/auth/logout` | Rotate tokens; revoke the session | Phase 2 |
+| `POST` | `/auth/refresh` | Exchange the refresh cookie for a new token pair (rotation). Reusing an old refresh token revokes the whole session | ✅ |
+| `POST` | `/auth/logout` | Revoke the session and clear both cookies. Always `204`, even with no cookie | ✅ |
 | `GET` | `/me` | 🔒 The current user, read fresh from the database. `401` without a valid access token | ✅ |
 | `PATCH` | `/movies/:imdb_id/review` | Admin review → LLM ranking | Phase 3 |
 | `GET` | `/recommendations` | Movies from the user's favorite genres, best-ranked first | Phase 4 |
@@ -142,12 +143,13 @@ magicstream/
     ├── database/
     │   └── database.go       # Mongo connection (fail-fast ping) and index setup
     ├── handlers/
-    │   ├── auth.go           # Registration and login
+    │   ├── auth.go           # Register, login, refresh, logout, /me
     │   └── movies.go         # Movie read endpoints
     ├── middleware/
     │   └── auth.go           # RequireAuth: verifies the access cookie, sets user identity
     ├── models/
     │   ├── movie.go          # Movie, Genre, Ranking document types
+    │   ├── refresh_token.go  # Server-side refresh token record (hash only)
     │   └── user.go           # User document and RegisterRequest
     ├── .env.example          # Committed config template
     ├── go.mod
@@ -245,6 +247,23 @@ A JWT is a snapshot taken at login: a role changed or an account deleted since t
 
 ### One response for every authentication failure
 A missing cookie, a bad signature, a forged algorithm, and an expired token all return the same `401 authentication required`. The specific reason is logged on the server for debugging; a client probing the API learns nothing about which check it failed.
+
+### Refresh tokens are stored server-side, as SHA-256 hashes
+Revocation requires state, so every issued refresh token has a database record. The record holds a SHA-256 hash of the token, never the token itself, so a database leak yields nothing that can be replayed as a cookie. SHA-256 rather than bcrypt is deliberate: bcrypt's slowness protects low-entropy, human-chosen passwords, while a refresh token is ~256 bits of server-generated randomness with nothing to guess. A fast hash is safe here, and a refresh takes ~14ms instead of ~350ms. Every token also carries a random `jti` claim, so two tokens issued in the same second can never be byte-identical.
+
+### Rotation with reuse detection
+Every refresh token is single-use: `/auth/refresh` marks it used and issues a new pair in the same session *family*. A legitimate client only ever presents its latest token, so a token that has already been used appearing again means two parties hold copies: the user and a thief. The server can't tell which request is which, so it revokes the entire family, logging both out. A stolen refresh token becomes worthless the moment either party uses it after the other. Used tokens are kept (marked, not deleted) until their natural expiry precisely so reuse can be recognized.
+
+**Known limitation:** two browser tabs refreshing at the same instant with the same token will trigger a false reuse alarm and log the user out. Production systems add a short grace window for this; it is noted here rather than implemented.
+
+### Claiming a refresh token is atomic
+A check-then-update sequence would let two simultaneous requests both spend the same token. Instead, a single `FindOneAndUpdate` filtered on `used_at: null` finds the token and marks it used in one operation, and MongoDB guarantees only one request can win.
+
+### Expired records clean themselves up
+A TTL index on `expires_at` makes MongoDB delete each refresh-token record automatically once it expires. No cleanup job exists to forget about or to fail.
+
+### Logout is idempotent, with an honest limit
+Logout revokes the session's whole family and clears both cookies, and it always returns `204`, because "make sure I'm logged out" should never fail. It doesn't verify the refresh JWT's signature: it hashes what it received and looks it up, so forged tokens simply match nothing, and a session can be revoked even after its JWT expires. Cookies are cleared on the same `Path` they were set with; otherwise the browser would keep them. **Limit:** an access token issued before logout remains valid until it expires (at most 15 minutes), because access tokens are verified without the database. This was tested and confirmed, and it is the deliberate cost of stateless access tokens.
 
 ---
 
@@ -368,6 +387,26 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | Refresh token sent as access token | `401` | `token signature is invalid` | ✅ |
 | Expired token (unit test) | `ErrTokenExpired` | — | ✅ |
 
+### Phase 2d — Refresh rotation and logout ✅
+
+- `refresh_tokens` collection: SHA-256 hash, user, family, expiry, `used_at`; unique, family, and TTL indexes
+- `POST /auth/refresh`: atomic claim, rotation within the family, reuse detection that revokes the family
+- `POST /auth/logout`: revokes the family, clears cookies on their original paths, idempotent
+- Every token carries a random `jti`
+
+| Test | Expected | Result |
+|---|---|---|
+| Refresh with a valid token | `200`, new pair, refresh token changed (~14ms, no bcrypt) | ✅ |
+| Database after rotation | One family, two hashed records: old `used_at` set, new `null` | ✅ |
+| Replay the old (used) token | `401`, server logs reuse detected and revokes the family | ✅ |
+| Then use the legitimate new token | `401`: the whole family is revoked | ✅ |
+| Records remaining for that family | `0` | ✅ |
+| Logout | `204`, both cookies `Max-Age=0` on their original paths | ✅ |
+| Refresh with a token saved before logout | `401`, no reuse alarm (revoked, not reused) | ✅ |
+| Access token saved before logout | `200` until expiry: the documented trade-off | ✅ |
+| Logout with no cookies | `204` (idempotent) | ✅ |
+| Unit tests after token changes | Pass | ✅ |
+
 ---
 
 ## Roadmap
@@ -376,7 +415,7 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 |---|---|---|
 | 0 | Foundation: server, Docker Compose MongoDB, config, LLM smoke test | ✅ |
 | 1 | Data layer: connection, movie model, unique index, idempotent seeding, read endpoints | ✅ |
-| 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | 🔨 2a–2c done |
+| 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | 🔨 2a–2d done |
 | 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | ⬜ |
 | 4 | Recommendations by favorite genres, sorted by ranking | ⬜ |
 | 5 | React client: browse, auth, trailer player, recommendations, admin review form | ⬜ |

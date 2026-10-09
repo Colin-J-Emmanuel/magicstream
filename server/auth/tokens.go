@@ -1,7 +1,11 @@
 package auth
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -42,10 +46,15 @@ func (tm *TokenManager) IssueRefresh(userID, role string) (string, error) {
 }
 
 func issue(userID, role string, secret []byte, ttl time.Duration) (string, error) {
+	id, err := NewID()
+	if err != nil {
+		return "", fmt.Errorf("generating token id: %w", err)
+	}
 	now := time.Now()
 	claims := Claims{
 		Role: role,
 		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        id,
 			Subject:   userID,
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
@@ -76,4 +85,19 @@ func parse(tokenString string, secret []byte) (*Claims, error) {
 		return nil, errors.New("token has no subject")
 	}
 	return claims, nil
+}
+
+// NewID returns a random 128-bit identifier, hex-encoded.
+func NewID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// HashToken returns the SHA-256 hex digest of a token. Refresh tokens are stored only as hashes.
+func HashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
