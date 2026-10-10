@@ -4,7 +4,7 @@ A full-stack movie streaming app with AI-ranked reviews and personalized recomme
 
 **Stack:** Go (Gin) · MongoDB · React · OpenAI-compatible LLM (Groq free tier) · Docker Compose
 
-> **Status:** 🚧 In active development. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), LLM-ranked reviews verified across two providers, and personalized recommendations backed by a verified index. The React client is in progress: it talks to the API through a same-origin proxy. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
+> **Status:** 🚧 In active development. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), LLM-ranked reviews verified across two providers, and personalized recommendations backed by a verified index. The React client is in progress: it talks to the API through a same-origin proxy and handles sign-in, registration, and silent session refresh. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
 
 ---
 
@@ -93,6 +93,7 @@ curl -s localhost:8080/health
 cd server && go test -race ./...     # Go unit tests
 cd client && npx tsc -b              # TypeScript type-check
 cd client && npm run lint            # ESLint
+cd client && npm test                # Vitest unit tests (API client)
 ```
 
 `-race` enables Go's race detector, which matters for the LLM tests: their fake provider runs on separate goroutines.
@@ -160,9 +161,19 @@ magicstream/
 │   ├── vite.config.ts        # Dev proxy: /api → Go on :8080
 │   └── src/
 │       ├── api/
-│       │   ├── client.ts     # Single fetch wrapper; typed results, ApiError with status
+│       │   ├── client.ts     # Single fetch wrapper: typed results, ApiError, single-flight silent refresh
+│       │   ├── client.test.ts # Vitest tests for refresh, concurrency, and failure paths
 │       │   └── types.ts      # TypeScript mirrors of the Go JSON shapes
-│       └── App.tsx
+│       ├── auth/
+│       │   ├── context.ts    # Auth state shape and React context
+│       │   ├── AuthProvider.tsx # Loads the user from /api/me; login, register, logout
+│       │   └── useAuth.ts    # Hook for reading auth state in components
+│       ├── components/
+│       │   ├── LoginForm.tsx
+│       │   ├── RegisterForm.tsx
+│       │   └── MovieList.tsx
+│       ├── App.tsx           # Signed-out forms or signed-in view
+│       └── main.tsx          # Root: StrictMode + AuthProvider
 └── server/
     ├── main.go               # Entry point: config, DB connection, indexes, routes
     ├── auth/
@@ -407,6 +418,24 @@ Every request goes through a single `api<T>()` function that prefixes `/api`, pa
 
 ### Requests are cancelled when a component goes away
 Each data-fetching effect creates an `AbortController` and aborts it in the effect's cleanup, the browser equivalent of cancelling a Go `context`. React's StrictMode deliberately mounts components twice in development to expose effects that skip this; the Network tab showed the first request `(canceled)` after 1ms and the second returning `200`, and the Go server received only one request.
+
+### The server decides who is signed in
+The auth cookies are `HttpOnly`, so the client can't inspect them. On load it calls `/api/me`: `200` means signed in, `401` means signed out. The result lives in a React context that every component reads through `useAuth()`, which throws if used outside the provider rather than returning a silent `null`. A `loading` state prevents the login form from flashing before `/me` answers. In testing, `document.cookie` returned an empty string while both auth cookies existed.
+
+### Silent refresh, centralized in the API client
+When a request returns `401`, the API client calls `/api/auth/refresh` and, if it succeeds, retries the original request once. Components never see an expiry. If the refresh fails, the client notifies the auth context and the app shows the login form. Auth routes are excluded: a `401` from `/auth/login` means wrong credentials, and refreshing on `/auth/refresh` itself would loop.
+
+### Concurrent 401s share one refresh
+Refresh tokens are single-use with reuse detection, so if three requests expired at once and each started its own refresh, the second would present an already-used token and the server would revoke the whole session: the user's own browser would log them out. The client keeps the in-flight refresh as a shared promise; every `401` that arrives meanwhile waits on it. The refresh isn't tied to any single request's abort signal, since several callers depend on it. A unit test recreates the race by holding the refresh open until three requests have received `401`, and asserts one refresh call; with the single-flight guard removed, the test fails with three.
+
+### Client-side validation is for convenience
+The forms use HTML constraints (`required`, `type="email"`, `minLength`) and a genre check to catch mistakes without a round trip. They protect nothing, since anyone can call the API directly; the server's validation remains the defense, and its messages (`409 an account with this email already exists`) are shown as-is.
+
+### Registration and login stay separate
+`/register` creates an account but doesn't start a session; the client calls login immediately afterwards. That costs a second bcrypt hash (~730ms in total) and keeps a single place on the server where sessions begin.
+
+### Genres come from the catalog
+The registration form derives its genre choices from the distinct genres in `/api/movies` instead of a hardcoded list, so it can never offer a genre the database doesn't have. A dedicated endpoint would be the scalable version.
 
 ### Provider choice: Groq
 With ranking quality equivalent on the evaluation set, the choice came down to operations. Groq answered in well under a second; Gemini took ~2 seconds per call, hit its free-tier quota (`429`) after about seventeen quick requests, and stalled for several minutes during one session. Both remain one `.env` edit away.
@@ -733,6 +762,37 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | Backend down | Page shows `502: Bad Gateway` instead of crashing | ✅ |
 | Type safety | `m.titel` fails `tsc` with `TS2551` pointing at `types.ts` | ✅ |
 
+### Phase 5b — Auth in the UI ✅
+
+- `AuthProvider` + `useAuth`: user state from `/api/me`; login, register (then login), logout
+- API client: single-flight silent refresh on `401`, retry once, session-expired callback, auth routes excluded
+- Login and registration forms with client-side validation and server error messages
+- Vitest added for client unit tests
+
+**Unit tests** (`npm test`, fake `fetch`)
+
+| Test | Expected | Result |
+|---|---|---|
+| Expired access token | Calls `me` → `refresh` → `me`; resolves | ✅ |
+| Three concurrent `401`s | Exactly **one** refresh | ✅ |
+| Same test with the single-flight guard removed | Fails: 3 refreshes (mutation check) | ✅ |
+| Refresh fails | Rejects with `ApiError`; expiry callback once; no loop | ✅ |
+| `401` from `/auth/login` | No refresh attempted | ✅ |
+
+**Browser tests** (Chrome DevTools)
+
+| Test | Expected | Result |
+|---|---|---|
+| First visit, no cookies | Login form; `me` 401 → one `refresh` 401 | ✅ |
+| Wrong password | Server message shown; no `refresh` request | ✅ |
+| Correct login | Signed in as Colin (ADMIN); both cookies `HttpOnly`, `SameSite=Lax`, paths `/` and `/api/auth`; `document.cookie` is `''` | ✅ |
+| Reload | Still signed in, no login-form flash | ✅ |
+| Access cookie deleted, reload | `me` 401 → `refresh` 200 → `me` 200; still signed in; no reuse alarm | ✅ |
+| Both cookies deleted, reload | `me` 401 → `refresh` 401, nothing after; login form | ✅ |
+| Register a new user | Six genres from the catalog; `register` 201 → `login` 200; signed in as Maya (USER) | ✅ |
+| Register a duplicate email | `register` 409, message shown, no `login` | ✅ |
+| Logout | `logout` 204; cookies cleared; reload stays signed out | ✅ |
+
 ---
 
 ## Roadmap
@@ -744,7 +804,7 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | ✅ |
 | 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | ✅ |
 | 4 | Recommendations by favorite genres, sorted by ranking | ✅ |
-| 5 | React client: browse, auth, trailer player, recommendations, admin review form | 🔨 5a done |
+| 5 | React client: browse, auth, trailer player, recommendations, admin review form | 🔨 5a–5b done |
 | 6 | Deploy: MongoDB Atlas, API on Render, client on Vercel | ⬜ |
 
 ---

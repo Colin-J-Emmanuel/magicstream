@@ -1,35 +1,39 @@
-import { useEffect, useState } from 'react'
-import { api, ApiError } from './api/client'
-import type { Movie } from './api/types'
+import { useState } from 'react'
+import { useAuth } from './auth/useAuth'
+import { LoginForm } from './components/LoginForm'
+import { MovieList } from './components/MovieList'
+import { RegisterForm } from './components/RegisterForm'
 
 export default function App() {
-  const [movies, setMovies] = useState<Movie[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const { status, user, logout } = useAuth()
+  const [mode, setMode] = useState<'login' | 'register'>('login')
 
-  useEffect(() => {
-    const controller = new AbortController()
-    api<Movie[]>('/movies', { signal: controller.signal })
-      .then(setMovies)
-      .catch((err) => {
-        if (err.name === 'AbortError') return // component went away; nothing to update
-        setError(err instanceof ApiError ? `${err.status}: ${err.message}` : 'could not reach the server')
-      })
-    return () => controller.abort() // cleanup: cancel the request if the component unmounts
-  }, [])
+  if (status === 'loading') return <p>Loading…</p>
 
-  if (error) return <p>Failed to load movies: {error}</p>
-  if (!movies) return <p>Loading…</p>
+  if (!user) {
+    return (
+      <main>
+        <h1>MagicStream</h1>
+        {mode === 'login' ? <LoginForm /> : <RegisterForm />}
+        <button type="button" onClick={() => setMode(mode === 'login' ? 'register' : 'login')}>
+          {mode === 'login' ? 'Need an account? Register' : 'Have an account? Log in'}
+        </button>
+      </main>
+    )
+  }
 
   return (
     <main>
-      <h1>MagicStream</h1>
-      <ul>
-        {movies.map((m) => (
-          <li key={m.imdb_id}>
-            {m.title}: {m.ranking.ranking_name}
-          </li>
-        ))}
-      </ul>
+      <header>
+        <h1>MagicStream</h1>
+        <p>
+          Signed in as {user.first_name} ({user.role})
+        </p>
+        <button type="button" onClick={() => void logout()}>
+          Log out
+        </button>
+      </header>
+      <MovieList />
     </main>
   )
 }
