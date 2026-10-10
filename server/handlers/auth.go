@@ -23,6 +23,10 @@ import (
 // prohibitive for brute-forcing a stolen database.
 const bcryptCost = 12
 
+// refreshCookiePath scopes the refresh cookie to the auth routes. It must match  // CHANGED: comment added
+// where those routes are mounted, or the browser silently stops sending it.
+const refreshCookiePath = "/api/auth"
+
 type AuthHandler struct {
 	users         *mongo.Collection
 	refreshTokens *mongo.Collection
@@ -145,7 +149,7 @@ func (h *AuthHandler) setAuthCookies(c *gin.Context, access, refresh string) {
 		HttpOnly: true, Secure: h.secureCookies, SameSite: http.SameSiteLaxMode,
 	})
 	http.SetCookie(c.Writer, &http.Cookie{
-		Name: "refresh_token", Value: refresh, Path: "/auth",
+		Name: "refresh_token", Value: refresh, Path: refreshCookiePath,
 		MaxAge:   int(auth.RefreshTTL.Seconds()),
 		HttpOnly: true, Secure: h.secureCookies, SameSite: http.SameSiteLaxMode,
 	})
@@ -296,7 +300,7 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 
 // clearAuthCookies expires both cookies. Path must match how they were set, or the browser keeps them.
 func (h *AuthHandler) clearAuthCookies(c *gin.Context) {
-	for _, ck := range []struct{ name, path string }{{"access_token", "/"}, {"refresh_token", "/auth"}} {
+	for _, ck := range []struct{ name, path string }{{"access_token", "/"}, {"refresh_token", refreshCookiePath}} {
 		http.SetCookie(c.Writer, &http.Cookie{
 			Name: ck.name, Value: "", Path: ck.path, MaxAge: -1,
 			HttpOnly: true, Secure: h.secureCookies, SameSite: http.SameSiteLaxMode,

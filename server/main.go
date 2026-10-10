@@ -52,26 +52,7 @@ func main() {
 		log.Fatalf("index setup failed: %v", err)
 	}
 
-	router := gin.Default()
-	if err := router.SetTrustedProxies(nil); err != nil {
-		log.Fatalf("failed to set trusted proxies: %v", err)
-	}
-
-	router.GET("/health", func(c *gin.Context) {
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
-		defer cancel()
-
-		if err := client.Ping(ctx, nil); err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "degraded", "database": "unreachable"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "database": "ok"})
-	})
-
-	movieHandler := handlers.NewMovieHandler(db)
-	router.GET("/movies", movieHandler.List)
-	router.GET("/movies/:imdb_id", movieHandler.Get)
-
+	// MOVED UP (contents unchanged): all setup now happens before any routes are registered.
 	tokens, err := auth.NewTokenManager(os.Getenv("ACCESS_TOKEN_SECRET"), os.Getenv("REFRESH_TOKEN_SECRET"))
 	if err != nil {
 		log.Fatalf("token setup failed: %v", err)
@@ -84,14 +65,37 @@ func main() {
 
 	secureCookies := os.Getenv("COOKIE_SECURE") == "true"
 
+	router := gin.Default()
+	if err := router.SetTrustedProxies(nil); err != nil {
+		log.Fatalf("failed to set trusted proxies: %v", err)
+	}
+
+	// UNCHANGED: /health stays at the root, outside /api, for hosting platforms to poll.
+	router.GET("/health", func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+		defer cancel()
+
+		if err := client.Ping(ctx, nil); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "degraded", "database": "unreachable"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "database": "ok"})
+	})
+
+	api := router.Group("/api") // NEW: every API route below is mounted under /api
+
+	movieHandler := handlers.NewMovieHandler(db)
+	api.GET("/movies", movieHandler.List)         // CHANGED: router → api
+	api.GET("/movies/:imdb_id", movieHandler.Get) // CHANGED: router → api
+
 	authHandler := handlers.NewAuthHandler(db, tokens, secureCookies)
-	authRoutes := router.Group("/auth")
+	authRoutes := api.Group("/auth") // CHANGED: router → api
 	authRoutes.POST("/register", authHandler.Register)
 	authRoutes.POST("/login", authHandler.Login)
 	authRoutes.POST("/refresh", authHandler.Refresh)
 	authRoutes.POST("/logout", authHandler.Logout)
 
-	protected := router.Group("/", middleware.RequireAuth(tokens))
+	protected := api.Group("", middleware.RequireAuth(tokens)) // CHANGED: router.Group("/", ...) → api.Group("", ...)
 	protected.GET("/me", authHandler.Me)
 
 	recommendationHandler := handlers.NewRecommendationHandler(db)
