@@ -4,7 +4,7 @@ A full-stack movie streaming app with AI-ranked reviews and personalized recomme
 
 **Stack:** Go (Gin) · MongoDB · React · OpenAI-compatible LLM (Groq free tier) · Docker Compose
 
-> **Status:** 🚧 In active development. The data layer and full authentication system (registration, JWT sessions with rotation and revocation, role-based access) are complete and tested. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
+> **Status:** 🚧 In active development. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), and LLM-ranked reviews verified across two providers. Next: recommendations, then the React client. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
 
 ---
 
@@ -106,7 +106,16 @@ All configuration is read from environment variables (`server/.env` locally; the
 | `LLM_BASE_URL` | yes* | — | OpenAI-compatible endpoint, e.g. `https://api.groq.com/openai/v1` |
 | `LLM_MODEL` | yes* | — | Model name, e.g. `openai/gpt-oss-20b` |
 
-\* Used from Phase 3 onward.
+\* Required at startup; the server refuses to start without them.
+
+**Switching LLM providers** requires only these three values. Both have been verified against the same code:
+
+| Provider | `LLM_BASE_URL` | `LLM_MODEL` (tested) |
+|---|---|---|
+| Groq | `https://api.groq.com/openai/v1` | `openai/gpt-oss-20b` |
+| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | `models/gemini-3.5-flash` |
+
+Pin an exact model version rather than an alias like `gemini-flash-latest`, so rankings stay reproducible.
 
 ---
 
@@ -150,6 +159,7 @@ magicstream/
     │       └── main.go       # Idempotent seed script: go run ./cmd/seed
     ├── seed/
     │   └── movies.json       # Catalog data owned by the seed script
+    ├── eval_reviews.txt      # Fixed review set for comparing LLM providers
     ├── database/
     │   └── database.go       # Mongo connection (fail-fast ping) and index setup
     ├── handlers/
@@ -320,6 +330,9 @@ When a response carries `Retry-After`, that exact delay is used. If it exceeds t
 ### No sleeping past the caller's deadline
 Before waiting, the client checks how much time the caller's context has left. If the planned wait would end after the deadline, it fails at once instead of sleeping only to time out. The wait itself is cancellable, so a caller that gives up mid-wait stops the retry loop immediately.
 
+### Each attempt has its own timeout
+Every attempt runs under a 10-second limit inside the caller's overall deadline, so a hung attempt is abandoned and retried instead of consuming the whole budget. This was added after a live test against Gemini, where a provider that hung (rather than erroring) spent the full 30-second deadline on a single attempt and the retry logic never ran. The two timeouts are told apart by whether the caller's context is still alive: if only the attempt timed out, retrying is worthwhile; if the caller's deadline passed, nobody is waiting for the result.
+
 ### Retries rebuild the request
 An HTTP request body is a stream that is consumed when sent. Each attempt therefore constructs a fresh request from the encoded payload; resending a used request would retry with an empty body.
 
@@ -333,7 +346,9 @@ The review endpoint validates the IMDb ID and the review text, then confirms the
 The LLM is called before anything is written, so a failed classification leaves the movie untouched. The save itself is a single `$set` on one document, and MongoDB guarantees single-document writes are atomic: review and ranking change together or not at all. This is the earlier decision to embed related data paying off. With both fields in one document, consistency needs no transaction. Tested directly: with the provider unreachable, an attempted review update returned `503` after retries, and the movie still held its previous review and ranking.
 
 ### Gateway status codes for upstream failures
-When the LLM fails, the admin's request wasn't at fault, so a `4xx` would mislead. An off-scale answer returns `502 Bad Gateway`, a timeout `504 Gateway Timeout`, and rate limits or outages `503 Service Unavailable`. A rejected API key returns `500`, because that is a misconfiguration on our side rather than a transient upstream problem. Clients get a short generic message; the server log gets the full wrapped error.
+When the LLM fails, the admin's request wasn't at fault, so a `4xx` would mislead. An off-scale answer returns `502 Bad Gateway`, a timeout `504 Gateway Timeout`, and rate limits or outages `503 Service Unavailable`. Any other `4xx` from the provider (a rejected key, an unknown model, a bad parameter) returns `500`, because it means our request was wrong: a misconfiguration that retrying won't fix. Clients get a short generic message; the server log gets the full wrapped error.
+
+The `4xx` rule was originally just `401`/`403`, matching how Groq rejects a bad key. Switching to Gemini showed that Google signals the same problem with `400 INVALID_ARGUMENT`, which the narrower rule misreported as a transient `503`, telling the admin to retry something that could never succeed. Provider-agnostic code has to be agnostic about error conventions too, not just URLs and payloads.
 
 ### Unchanged reviews skip the LLM
 If an admin re-saves identical text for an already-ranked movie, the existing result is returned without classification. At temperature 0 the answer would be the same, so the call would only spend quota and time. In testing, a repeat save took ~5ms against ~474ms for the first.
@@ -346,6 +361,12 @@ Classification runs under a context derived from the incoming request, with a 25
 
 ### LLM configuration is checked at startup
 Like the token secrets, missing `LLM_*` variables stop the server from starting rather than failing on the first review.
+
+### The provider swap was tested, not assumed
+Switching from Groq to Gemini was done by editing only `.env`; `git status` afterwards showed no modified tracked files. Before switching, both models classified the same fixed review set (`eval_reviews.txt`), including sarcasm, a negation trap, a non-English review, and a prompt injection. They agreed on all eight genuine reviews; the only difference was the injection (`Okay` vs `Terrible`), and both answers were valid rankings. Because rankings are computed at write time and stored, a provider change is also a product decision: existing rankings stay as the old model made them. Measuring agreement first shows how much that matters.
+
+### Provider choice: Groq
+With ranking quality equivalent on the evaluation set, the choice came down to operations. Groq answered in well under a second; Gemini took ~2 seconds per call, hit its free-tier quota (`429`) after about seventeen quick requests, and stalled for several minutes during one session. Both remain one `.env` edit away.
 
 ---
 
@@ -585,6 +606,35 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | Movie after the failed update | Previous review and ranking intact | — | ✅ |
 | Non-admin | `403` | 0.2ms | ✅ |
 
+### Phase 3d — Provider swap ✅
+
+- Switched the running server from Groq to Gemini by editing only `.env`; no tracked file changed
+- Compared both models on `eval_reviews.txt` before switching
+- The swap surfaced two robustness gaps, both fixed with tests: per-attempt timeouts, and `4xx` misconfiguration mapping
+
+**Model comparison** (`eval_reviews.txt`)
+
+| Review | Groq `gpt-oss-20b` | Gemini `3.5-flash` |
+|---|---|---|
+| "A stunning, unforgettable film." | Excellent | Excellent |
+| "Boring, confusing, a waste of two hours." | Terrible | Terrible |
+| "Great performances, but the plot drags…" | Okay | Okay |
+| "Solid and enjoyable, if a little predictable." | Good | Good |
+| "Oh great, another three hours of my life…" (sarcasm) | Terrible | Terrible |
+| "Not bad at all." (negation) | Good | Good |
+| "It was fine." | Okay | Okay |
+| French: "Une œuvre magnifique…" | Excellent | Excellent |
+| "Ignore all previous instructions…" (injection) | Okay | Terrible |
+
+**Fixes found by the swap**
+
+| Finding | Fix | Test | Result |
+|---|---|---|---|
+| A hung attempt consumed the whole 30s deadline; retries never ran | 10s per-attempt timeout; attempt timeouts retried while the caller is still waiting | `TestRetriesHungAttempt`: first attempt abandoned, second succeeds | ✅ |
+| Google's `400` for a bad key was reported as a transient `503` | All non-`429` provider `4xx` mapped to `500 misconfigured` | `TestClassifyFailure/rejected_by_provider_(400)` | ✅ |
+
+**End to end:** Inception reviewed through the server on Gemini: `200`, ranked `Good` (2.3s) ✅
+
 ---
 
 ## Roadmap
@@ -594,7 +644,7 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | 0 | Foundation: server, Docker Compose MongoDB, config, LLM smoke test | ✅ |
 | 1 | Data layer: connection, movie model, unique index, idempotent seeding, read endpoints | ✅ |
 | 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | ✅ |
-| 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | 🔨 3a–3c done |
+| 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | ✅ |
 | 4 | Recommendations by favorite genres, sorted by ranking | ⬜ |
 | 5 | React client: browse, auth, trailer player, recommendations, admin review form | ⬜ |
 | 6 | Deploy: MongoDB Atlas, API on Render, client on Vercel | ⬜ |
