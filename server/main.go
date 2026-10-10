@@ -94,6 +94,9 @@ func main() {
 	protected := router.Group("/", middleware.RequireAuth(tokens))
 	protected.GET("/me", authHandler.Me)
 
+	recommendationHandler := handlers.NewRecommendationHandler(db)
+	protected.GET("/recommendations", recommendationHandler.List)
+
 	adminHandler := handlers.NewAdminHandler(db)
 	admin := protected.Group("/admin", middleware.RequireRole(models.RoleAdmin))
 	admin.GET("/users", adminHandler.ListUsers)

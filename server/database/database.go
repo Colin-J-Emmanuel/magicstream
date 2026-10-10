@@ -54,5 +54,17 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 		return fmt.Errorf("creating refresh_tokens indexes: %w", err)
 	}
 
+	// Supports GET /recommendations: filter by genre, then sort by ranking and title.
+	_, err = db.Collection("movies").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "genre.genre_id", Value: 1},
+			{Key: "ranking.ranking_value", Value: 1},
+			{Key: "title", Value: 1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("creating recommendations index on movies: %w", err)
+	}
+
 	return nil
 }

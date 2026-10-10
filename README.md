@@ -4,7 +4,7 @@ A full-stack movie streaming app with AI-ranked reviews and personalized recomme
 
 **Stack:** Go (Gin) · MongoDB · React · OpenAI-compatible LLM (Groq free tier) · Docker Compose
 
-> **Status:** 🚧 In active development. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), and LLM-ranked reviews verified across two providers. Next: recommendations, then the React client. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
+> **Status:** 🚧 In active development. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), LLM-ranked reviews verified across two providers, and personalized recommendations backed by a verified index. Next: the React client. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
 
 ---
 
@@ -133,7 +133,7 @@ Pin an exact model version rather than an alias like `gemini-flash-latest`, so r
 | `GET` | `/me` | 🔒 The current user, read fresh from the database. `401` without a valid access token | ✅ |
 | `GET` | `/admin/users` | 👑 All users, oldest first. `401` if not logged in, `403` if not an admin | ✅ |
 | `PATCH` | `/admin/movies/:imdb_id/review` | 👑 Classify a review with the LLM and save review and ranking together. `404` for an unknown movie (no LLM call made); `502`/`503`/`504` if the LLM fails, with nothing saved | ✅ |
-| `GET` | `/recommendations` | Movies from the user's favorite genres, best-ranked first | Phase 4 |
+| `GET` | `/recommendations` | 🔒 Movies in the caller's favorite genres ranked `Okay` or better, best first, ties by title. `?limit=` 1–50 (default 10) | ✅ |
 
 🔒 = requires authentication. 👑 = requires the `ADMIN` role.
 
@@ -166,6 +166,7 @@ magicstream/
     │   ├── admin.go          # Admin-only endpoints
     │   ├── auth.go           # Register, login, refresh, logout, /me
     │   ├── movies.go         # Movie read endpoints
+    │   ├── recommendations.go # Personalized recommendations
     │   └── reviews.go        # Admin review → LLM ranking
     ├── llm/
     │   ├── client.go         # Hand-written OpenAI-compatible chat client with retry and backoff
@@ -364,6 +365,18 @@ Like the token secrets, missing `LLM_*` variables stop the server from starting 
 
 ### The provider swap was tested, not assumed
 Switching from Groq to Gemini was done by editing only `.env`; `git status` afterwards showed no modified tracked files. Before switching, both models classified the same fixed review set (`eval_reviews.txt`), including sarcasm, a negation trap, a non-English review, and a prompt injection. They agreed on all eight genuine reviews; the only difference was the injection (`Okay` vs `Terrible`), and both answers were valid rankings. Because rankings are computed at write time and stored, a provider change is also a product decision: existing rankings stay as the old model made them. Measuring agreement first shows how much that matters.
+
+### A recommendation is an endorsement
+Recommendations include only movies ranked `Okay` or better. Unranked movies carry no signal yet, and recommending a movie rated `Terrible` isn't a recommendation. The `999` sentinel for unranked movies makes this a single filter, `ranking_value ≤ 3`, that excludes unranked, `Bad`, and `Terrible` movies at once with no separate "is it ranked?" check.
+
+### Deterministic order
+Results sort by `ranking_value` and then by `title`. Without the tie-breaker, movies with equal rankings could come back in any order and the list would shuffle between loads.
+
+### Preferences are read fresh, matched by ID
+Favorite genres are loaded from the database on each request (with a projection that fetches only that field), not carried in the token, so edited preferences take effect immediately. Matching uses genre IDs rather than names, since names are display text that could change.
+
+### An index shaped like the query, verified with `explain()`
+The compound index `{genre.genre_id, ranking.ranking_value, title}` puts the filtered field first and the sort fields after it. Because `genre` is an array, it is a multikey index: a movie gets one entry per genre, so a user who likes two of a movie's genres finds it twice during the scan, and MongoDB removes the duplicate. `explain("executionStats")` on a two-genre query showed one `IXSCAN` per genre, merged by a `SORT_MERGE` stage with no in-memory `SORT`, and `docsExamined` equal to `nReturned` (4 of 8 documents read, all 4 returned).
 
 ### Provider choice: Groq
 With ranking quality equivalent on the evaluation set, the choice came down to operations. Groq answered in well under a second; Gemini took ~2 seconds per call, hit its free-tier quota (`429`) after about seventeen quick requests, and stalled for several minutes during one session. Both remain one `.env` edit away.
@@ -635,6 +648,35 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 
 **End to end:** Inception reviewed through the server on Gemini: `200`, ranked `Good` (2.3s) ✅
 
+### Phase 4 — Recommendations ✅
+
+- `GET /recommendations` on the protected group: favorite genres from the database, `$in` on genre IDs, `ranking_value ≤ 3`, sorted by ranking then title, bounded `limit`
+- Compound multikey index `{genre.genre_id, ranking.ranking_value, title}`, created at startup
+
+**Test data.** Four more movies were reviewed through the real endpoint. Expected results were derived from the stored rankings rather than predicted, since the LLM chose them (it ranked Parasite `Bad`):
+
+| Ranking | Movie | Genres |
+|---|---|---|
+| 1 Excellent | The Dark Knight | Action, Crime |
+| 1 Excellent | The Godfather | Drama, Crime |
+| 1 Excellent | The Shawshank Redemption | Drama |
+| 2 Good | Inception | Action, Sci-Fi |
+| 2 Good | Interstellar | Sci-Fi, Drama |
+| 4 Bad | Parasite | Thriller, Drama |
+| 5 Terrible | Pulp Fiction | Crime |
+| 999 Not ranked | Spirited Away | Animation |
+
+| Test | Expected | Result |
+|---|---|---|
+| Not logged in | `401` | ✅ |
+| Drama fan | Godfather, Shawshank, Interstellar; Parasite (`Bad`) excluded; ties alphabetical | ✅ |
+| `?limit=2` | First two only | ✅ |
+| `?limit=0`, `abc`, `51` | `400` each | ✅ |
+| Drama + Sci-Fi fan | Godfather, Shawshank, Inception, Interstellar, with Interstellar **once** despite matching both genres | ✅ |
+| Animation + Crime fan | Dark Knight, Godfather; Spirited Away (unranked) and Pulp Fiction (`Terrible`) excluded | ✅ |
+| `explain()` on a two-genre query | `IXSCAN` ×2 → `SORT_MERGE` → `FETCH`, no in-memory `SORT`; 4 documents examined, 4 returned | ✅ |
+| Latency | 5–11ms per request | ✅ |
+
 ---
 
 ## Roadmap
@@ -645,7 +687,7 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | 1 | Data layer: connection, movie model, unique index, idempotent seeding, read endpoints | ✅ |
 | 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | ✅ |
 | 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | ✅ |
-| 4 | Recommendations by favorite genres, sorted by ranking | ⬜ |
+| 4 | Recommendations by favorite genres, sorted by ranking | ✅ |
 | 5 | React client: browse, auth, trailer player, recommendations, admin review form | ⬜ |
 | 6 | Deploy: MongoDB Atlas, API on Render, client on Vercel | ⬜ |
 
