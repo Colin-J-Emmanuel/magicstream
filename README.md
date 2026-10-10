@@ -4,7 +4,7 @@ A full-stack movie streaming app with AI-ranked reviews and personalized recomme
 
 **Stack:** Go (Gin) · MongoDB · React · OpenAI-compatible LLM (Groq free tier) · Docker Compose
 
-> **Status:** 🚧 In active development. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), LLM-ranked reviews verified across two providers, and personalized recommendations backed by a verified index. Next: the React client. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
+> **Status:** 🚧 In active development. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), LLM-ranked reviews verified across two providers, and personalized recommendations backed by a verified index. The React client is in progress: it talks to the API through a same-origin proxy. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
 
 ---
 
@@ -45,6 +45,7 @@ The LLM is called **only when an admin saves a review**, never when a user brows
 ### Prerequisites
 
 - [Go](https://go.dev/dl/) 1.27+
+- [Node.js](https://nodejs.org/) 22 (pinned in `.nvmrc`; with nvm, run `nvm use`)
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (runs MongoDB locally)
 - A free [Groq API key](https://console.groq.com/) (no credit card required)
 
@@ -70,7 +71,14 @@ go run .
 
 # 5. (Optional) After registering an account, make it an admin
 go run ./cmd/promote -email you@example.com
+
+# 6. In a second terminal, run the React client
+cd client
+npm install
+npm run dev                 # open http://localhost:5173
 ```
+
+The client's dev server forwards every `/api` request to the Go server on port 8080, so both must be running.
 
 ### Verify
 
@@ -79,11 +87,12 @@ curl -s localhost:8080/health
 # {"database":"ok","status":"ok"}
 ```
 
-### Run unit tests
+### Run checks
 
 ```bash
-cd server
-go test -race ./...
+cd server && go test -race ./...     # Go unit tests
+cd client && npx tsc -b              # TypeScript type-check
+cd client && npm run lint            # ESLint
 ```
 
 `-race` enables Go's race detector, which matters for the LLM tests: their fake provider runs on separate goroutines.
@@ -121,19 +130,21 @@ Pin an exact model version rather than an alias like `gemini-flash-latest`, so r
 
 ## API
 
+All API routes are mounted under `/api`; `/health` stays at the root for hosting platforms to poll.
+
 | Method | Path | Description | Status |
 |---|---|---|---|
 | `GET` | `/health` | Liveness + database reachability. `200` when healthy, `503` when MongoDB is unreachable | ✅ |
-| `GET` | `/movies` | List all movies, sorted by title. Returns `[]` (never `null`) when empty | ✅ |
-| `GET` | `/movies/:imdb_id` | Get one movie. `400` if the ID isn't IMDb-shaped, `404` if not found | ✅ |
-| `POST` | `/auth/register` | Create an account. `201` on success, `400` on invalid input, `409` if the email is taken | ✅ |
-| `POST` | `/auth/login` | Verify credentials and set `access_token` / `refresh_token` http-only cookies. `401` with one generic message for any bad credentials | ✅ |
-| `POST` | `/auth/refresh` | Exchange the refresh cookie for a new token pair (rotation). Reusing an old refresh token revokes the whole session | ✅ |
-| `POST` | `/auth/logout` | Revoke the session and clear both cookies. Always `204`, even with no cookie | ✅ |
-| `GET` | `/me` | 🔒 The current user, read fresh from the database. `401` without a valid access token | ✅ |
-| `GET` | `/admin/users` | 👑 All users, oldest first. `401` if not logged in, `403` if not an admin | ✅ |
-| `PATCH` | `/admin/movies/:imdb_id/review` | 👑 Classify a review with the LLM and save review and ranking together. `404` for an unknown movie (no LLM call made); `502`/`503`/`504` if the LLM fails, with nothing saved | ✅ |
-| `GET` | `/recommendations` | 🔒 Movies in the caller's favorite genres ranked `Okay` or better, best first, ties by title. `?limit=` 1–50 (default 10) | ✅ |
+| `GET` | `/api/movies` | List all movies, sorted by title. Returns `[]` (never `null`) when empty | ✅ |
+| `GET` | `/api/movies/:imdb_id` | Get one movie. `400` if the ID isn't IMDb-shaped, `404` if not found | ✅ |
+| `POST` | `/api/auth/register` | Create an account. `201` on success, `400` on invalid input, `409` if the email is taken | ✅ |
+| `POST` | `/api/auth/login` | Verify credentials and set `access_token` / `refresh_token` http-only cookies. `401` with one generic message for any bad credentials | ✅ |
+| `POST` | `/api/auth/refresh` | Exchange the refresh cookie for a new token pair (rotation). Reusing an old refresh token revokes the whole session | ✅ |
+| `POST` | `/api/auth/logout` | Revoke the session and clear both cookies. Always `204`, even with no cookie | ✅ |
+| `GET` | `/api/me` | 🔒 The current user, read fresh from the database. `401` without a valid access token | ✅ |
+| `GET` | `/api/admin/users` | 👑 All users, oldest first. `401` if not logged in, `403` if not an admin | ✅ |
+| `PATCH` | `/api/admin/movies/:imdb_id/review` | 👑 Classify a review with the LLM and save review and ranking together. `404` for an unknown movie (no LLM call made); `502`/`503`/`504` if the LLM fails, with nothing saved | ✅ |
+| `GET` | `/api/recommendations` | 🔒 Movies in the caller's favorite genres ranked `Okay` or better, best first, ties by title. `?limit=` 1–50 (default 10) | ✅ |
 
 🔒 = requires authentication. 👑 = requires the `ADMIN` role.
 
@@ -144,7 +155,14 @@ Pin an exact model version rather than an alias like `gemini-flash-latest`, so r
 ```
 magicstream/
 ├── docker-compose.yml        # Local MongoDB with a persistent named volume
-├── client/                   # React app (Phase 5)
+├── .nvmrc                    # Node version for the client (22)
+├── client/                   # React + TypeScript (Vite)
+│   ├── vite.config.ts        # Dev proxy: /api → Go on :8080
+│   └── src/
+│       ├── api/
+│       │   ├── client.ts     # Single fetch wrapper; typed results, ApiError with status
+│       │   └── types.ts      # TypeScript mirrors of the Go JSON shapes
+│       └── App.tsx
 └── server/
     ├── main.go               # Entry point: config, DB connection, indexes, routes
     ├── auth/
@@ -258,7 +276,7 @@ If both token types shared one signing key, a stolen 7-day refresh token would a
 An unknown email and a wrong password both return the same `401 invalid email or password`. Because a wrong password costs ~350ms of bcrypt while a missing account would otherwise return instantly, the handler also runs bcrypt against a dummy hash when the email isn't found. In testing, the two cases took 340ms and 346ms: indistinguishable by message or by timing. (Registration's `409` does reveal whether an email is taken, a common trade-off for signup UX.)
 
 ### Tokens live in http-only cookies with a narrow refresh path
-Tokens are set as `HttpOnly` cookies so injected JavaScript can never read them, unlike `localStorage`. `SameSite=Lax` is a first layer of CSRF defense, and `Secure` is enabled in production. The refresh cookie's `Path` is `/auth`, so the long-lived token is sent only to authentication routes, never with ordinary requests like `/movies`.
+Tokens are set as `HttpOnly` cookies so injected JavaScript can never read them, unlike `localStorage`. `SameSite=Lax` is a first layer of CSRF defense, and `Secure` is enabled in production. The refresh cookie's `Path` is `/api/auth`, so the long-lived token is sent only to authentication routes, never with ordinary requests like `/api/movies`. The path is a single constant (`refreshCookiePath`) because it must match where the auth routes are mounted: if the two drift apart, the browser silently stops sending the cookie and sessions end after 15 minutes with no error anywhere.
 
 ### Tokens get no say in how they're verified
 A JWT's header declares its own signing algorithm, and early libraries trusted it: an attacker could set `"alg": "none"`, drop the signature, and be accepted. Verification here pins the algorithm to HS256 and supplies the key itself, ignoring whatever the token claims. An expiry claim is also required, so a token minted without one is rejected rather than treated as valid forever. All three attack paths were tested, and each was caught by a different defense: a tampered payload by the signature check, `alg: none` by the algorithm pin, and a refresh token posing as an access token by the separate secrets.
@@ -377,6 +395,18 @@ Favorite genres are loaded from the database on each request (with a projection 
 
 ### An index shaped like the query, verified with `explain()`
 The compound index `{genre.genre_id, ranking.ranking_value, title}` puts the filtered field first and the sort fields after it. Because `genre` is an array, it is a multikey index: a movie gets one entry per genre, so a user who likes two of a movie's genres finds it twice during the scan, and MongoDB removes the duplicate. `explain("executionStats")` on a two-genre query showed one `IXSCAN` per genre, merged by a `SORT_MERGE` stage with no in-memory `SORT`, and `docsExamined` equal to `nReturned` (4 of 8 documents read, all 4 returned).
+
+### One origin in the browser: a proxy instead of CORS
+In development the React dev server runs on `:5173` and Go on `:8080`, which the browser treats as different origins. Rather than configuring CORS, Vite's dev server proxies `/api/*` to Go, so the browser only ever talks to one origin. No CORS configuration exists to get wrong, and the auth cookies remain first-party, so the `SameSite=Lax` settings from Phase 2 work unchanged. Production will use the same shape through a hosting rewrite. This is why every API route lives under `/api`: the prefix is how the proxy tells API calls from client-side pages.
+
+### The frontend never handles tokens
+Requests are same-origin, so the browser attaches the http-only auth cookies automatically. No JavaScript reads, stores, or forwards a token, which keeps the XSS protection from the cookie design intact on the client side.
+
+### One typed API client
+Every request goes through a single `api<T>()` function that prefixes `/api`, parses JSON, and turns non-2xx responses into an `ApiError` carrying the status and the server's message, the frontend counterpart of the Go client's `StatusError`. TypeScript interfaces mirror the Go structs' JSON tags, so a component that uses a field the API doesn't return fails the build: a misspelled `m.titel` was rejected by `tsc` with *"Property 'titel' does not exist on type 'Movie'. Did you mean 'title'?"*
+
+### Requests are cancelled when a component goes away
+Each data-fetching effect creates an `AbortController` and aborts it in the effect's cleanup, the browser equivalent of cancelling a Go `context`. React's StrictMode deliberately mounts components twice in development to expose effects that skip this; the Network tab showed the first request `(canceled)` after 1ms and the second returning `200`, and the Go server received only one request.
 
 ### Provider choice: Groq
 With ranking quality equivalent on the evaluation set, the choice came down to operations. Groq answered in well under a second; Gemini took ~2 seconds per call, hit its free-tier quota (`429`) after about seventeen quick requests, and stalled for several minutes during one session. Both remain one `.env` edit away.
@@ -677,6 +707,32 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | `explain()` on a two-genre query | `IXSCAN` ×2 → `SORT_MERGE` → `FETCH`, no in-memory `SORT`; 4 documents examined, 4 returned | ✅ |
 | Latency | 5–11ms per request | ✅ |
 
+### Phase 5a — API prefix and client scaffold ✅
+
+- All API routes moved under `/api` with a nested route group; `/health` stays at the root
+- Refresh cookie re-scoped to `/api/auth` through a single `refreshCookiePath` constant
+- Vite + React + TypeScript client with ESLint; Node 22 pinned in `.nvmrc`
+- Dev proxy `/api → :8080`; typed `api<T>()` client and `ApiError`; first page lists movies
+
+**Backend** (curl)
+
+| Test | Expected | Result |
+|---|---|---|
+| `GET /api/movies` | `200` | ✅ |
+| `GET /movies` (old path) | `404` | ✅ |
+| Login | Refresh cookie `Path=/api/auth` | ✅ |
+| `POST /api/auth/refresh` with that cookie | `200`: the cookie path matches the route | ✅ |
+
+**Client** (browser)
+
+| Test | Expected | Result |
+|---|---|---|
+| End to end | Page lists all eight movies with rankings | ✅ |
+| Same origin | Request URL `localhost:5173/api/movies`; no CORS errors in the Console | ✅ |
+| StrictMode double mount | First request `(canceled)` after 1ms, second `200`; Go logged one request | ✅ |
+| Backend down | Page shows `502: Bad Gateway` instead of crashing | ✅ |
+| Type safety | `m.titel` fails `tsc` with `TS2551` pointing at `types.ts` | ✅ |
+
 ---
 
 ## Roadmap
@@ -688,7 +744,7 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | ✅ |
 | 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | ✅ |
 | 4 | Recommendations by favorite genres, sorted by ranking | ✅ |
-| 5 | React client: browse, auth, trailer player, recommendations, admin review form | ⬜ |
+| 5 | React client: browse, auth, trailer player, recommendations, admin review form | 🔨 5a done |
 | 6 | Deploy: MongoDB Atlas, API on Render, client on Vercel | ⬜ |
 
 ---
