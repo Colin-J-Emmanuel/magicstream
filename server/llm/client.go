@@ -18,15 +18,17 @@ import (
 
 // RetryPolicy controls how transient failures are retried.
 type RetryPolicy struct {
-	MaxAttempts int           // total attempts, including the first
-	BaseDelay   time.Duration // ceiling for the first backoff; doubles each retry
-	MaxDelay    time.Duration // cap on any single wait, including Retry-After
+	MaxAttempts    int           // total attempts, including the first
+	BaseDelay      time.Duration // ceiling for the first backoff; doubles each retry
+	MaxDelay       time.Duration // cap on any single wait, including Retry-After
+	AttemptTimeout time.Duration // per-attempt limit; 0 means only the caller's deadline applies
 }
 
 var DefaultRetryPolicy = RetryPolicy{
-	MaxAttempts: 3,
-	BaseDelay:   500 * time.Millisecond,
-	MaxDelay:    8 * time.Second,
+	MaxAttempts:    3,
+	BaseDelay:      500 * time.Millisecond,
+	MaxDelay:       8 * time.Second,
+	AttemptTimeout: 10 * time.Second,
 }
 
 // Client talks to any OpenAI-compatible chat completions endpoint.
@@ -96,7 +98,7 @@ func (c *Client) Complete(ctx context.Context, messages []Message) (string, erro
 		}
 		lastErr = err
 
-		if !isRetryable(err) || attempts == c.retry.MaxAttempts {
+		if !isRetryable(ctx, err) || attempts == c.retry.MaxAttempts {
 			break
 		}
 		delay, ok := c.nextDelay(attempts, err)
@@ -121,7 +123,14 @@ func (c *Client) Complete(ctx context.Context, messages []Message) (string, erro
 // completeOnce makes a single HTTP attempt. The body is rebuilt each time
 // because a request body is consumed when it's sent.
 func (c *Client) completeOnce(ctx context.Context, body []byte) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
+	attemptCtx := ctx
+	if c.retry.AttemptTimeout > 0 {
+		var cancel context.CancelFunc
+		attemptCtx, cancel = context.WithTimeout(ctx, c.retry.AttemptTimeout)
+		defer cancel()
+	}
+
+	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("building request: %w", err)
 	}
@@ -157,10 +166,14 @@ func (c *Client) completeOnce(ctx context.Context, body []byte) (string, error) 
 }
 
 // isRetryable reports whether sending the same request again could succeed.
-func isRetryable(err error) bool {
-	// Check the caller's context first: a deadline error is also a net.Error,
-	// but when the caller has given up, retrying is pointless.
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+func isRetryable(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false // the caller cancelled or their deadline passed: nobody is waiting
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true // only this attempt timed out (the caller is still waiting): try again
+	}
+	if errors.Is(err, context.Canceled) {
 		return false
 	}
 	var statusErr *StatusError
@@ -168,7 +181,7 @@ func isRetryable(err error) bool {
 		return statusErr.StatusCode == http.StatusTooManyRequests || statusErr.StatusCode >= 500
 	}
 	var netErr net.Error
-	return errors.As(err, &netErr) // connection refused/reset, per-attempt timeouts
+	return errors.As(err, &netErr) // connection refused/reset
 }
 
 // nextDelay returns how long to wait before the next attempt, and false if

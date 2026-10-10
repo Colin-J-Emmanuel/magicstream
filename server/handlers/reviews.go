@@ -122,7 +122,7 @@ func classifyFailure(err error) (int, string) {
 		return http.StatusBadGateway, "the ranking service returned an unusable answer for this review"
 	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusGatewayTimeout, "the ranking service took too long; please try again"
-	case errors.As(err, &statusErr) && (statusErr.StatusCode == http.StatusUnauthorized || statusErr.StatusCode == http.StatusForbidden):
+	case errors.As(err, &statusErr) && statusErr.StatusCode >= 400 && statusErr.StatusCode < 500 && statusErr.StatusCode != http.StatusTooManyRequests:
 		return http.StatusInternalServerError, "the ranking service is misconfigured"
 	default:
 		return http.StatusServiceUnavailable, "the ranking service is unavailable; please try again later"

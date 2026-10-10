@@ -21,6 +21,7 @@ func TestClassifyFailure(t *testing.T) {
 		{"bad api key", fmt.Errorf("llm call failed after 1 attempt(s): %w", &llm.StatusError{StatusCode: 401}), http.StatusInternalServerError},
 		{"rate limited past retries", fmt.Errorf("llm call failed after 3 attempt(s): %w", &llm.StatusError{StatusCode: 429}), http.StatusServiceUnavailable},
 		{"unreachable", errors.New("connection refused"), http.StatusServiceUnavailable},
+		{"rejected by provider (400)", fmt.Errorf("llm call failed after 1 attempt(s): %w", &llm.StatusError{StatusCode: 400}), http.StatusInternalServerError},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -233,3 +233,22 @@ func TestCompleteRespectsContextDeadline(t *testing.T) {
 		t.Fatalf("call took %v; the deadline was not enforced", elapsed)
 	}
 }
+
+func TestRetriesHungAttempt(t *testing.T) {
+	policy := RetryPolicy{MaxAttempts: 3, BaseDelay: time.Millisecond, MaxDelay: 5 * time.Millisecond, AttemptTimeout: 50 * time.Millisecond}
+	client, calls := newTestClient(t, policy, func(call int32, w http.ResponseWriter) {
+		if call == 1 {
+			time.Sleep(200 * time.Millisecond) // longer than AttemptTimeout: this attempt is abandoned
+			return
+		}
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"Good"}}]}`)
+	})
+
+	got, err := client.Complete(context.Background(), []Message{{Role: "user", Content: "hi"}})
+	if err != nil || got != "Good" {
+		t.Fatalf("got %q, %v; want Good after retrying the hung attempt", got, err)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("provider saw %d calls, want 2", n)
+	}
+}
