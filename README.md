@@ -8,8 +8,20 @@ A full-stack movie streaming app with AI-ranked reviews and personalized recomme
 
 ---
 
+## Screenshots
+
+![The catalog: each film as a title card, its ranking shown as five marquee bulbs](docs/screenshots/home.png)
+
+<p>
+  <img src="docs/screenshots/movie-detail.png" width="68%" alt="A movie page with the trailer playing beside the editor's review and its ranking" />
+  <img src="docs/screenshots/mobile.png" width="28%" alt="The same movie page at phone width, stacked in one column" />
+</p>
+
+---
+
 ## Table of contents
 
+- [Screenshots](#screenshots)
 - [Architecture](#architecture)
 - [Getting started](#getting-started)
 - [Configuration](#configuration)
@@ -156,6 +168,8 @@ All API routes are mounted under `/api`; `/health` stays at the root for hosting
 ```
 magicstream/
 ├── docker-compose.yml        # Local MongoDB with a persistent named volume
+├── docs/
+│   └── screenshots/          # README images
 ├── .nvmrc                    # Node version for the client (22)
 ├── client/                   # React + TypeScript (Vite)
 │   ├── vite.config.ts        # Dev proxy: /api → Go on :8080
