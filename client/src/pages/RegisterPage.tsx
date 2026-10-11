@@ -1,12 +1,14 @@
-import { Link, Navigate } from 'react-router'
+import { Link, Navigate, useLocation } from 'react-router'
 import { useAuth } from '../auth/useAuth'
 import { RegisterForm } from '../components/RegisterForm'
+import { returnPath } from '../lib/redirect'
 
 export function RegisterPage() {
   const { status, user } = useAuth()
+  const location = useLocation()
 
   if (status === 'loading') return null
-  if (user) return <Navigate to="/" replace />
+  if (user) return <Navigate to={returnPath(location.state)} replace />
 
   return (
     <section className="auth">
@@ -14,7 +16,10 @@ export function RegisterPage() {
       <p className="lede">Pick the genres you like. Your recommendations come from them.</p>
       <RegisterForm />
       <p className="switch">
-        Already have an account? <Link to="/login">Log in</Link>
+        Already have an account?{' '}
+        <Link to="/login" state={location.state}>
+          Log in
+        </Link>
       </p>
     </section>
   )

@@ -22,6 +22,7 @@ export function Layout() {
           </NavLink>
           {status === 'authenticated' && user && (
             <>
+              <NavLink to="/recommendations">For you</NavLink>
               <span className="user-name">Signed in as {user.first_name}</span>
               <button type="button" className="button-quiet" onClick={() => void handleLogout()}>
                 Log out

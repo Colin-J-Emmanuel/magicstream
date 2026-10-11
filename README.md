@@ -4,7 +4,7 @@ A full-stack movie streaming app with AI-ranked reviews and personalized recomme
 
 **Stack:** Go (Gin) · MongoDB · React · OpenAI-compatible LLM (Groq free tier) · Docker Compose
 
-> **Status:** 🚧 In active development. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), LLM-ranked reviews verified across two providers, and personalized recommendations backed by a verified index. The React client is in progress: it has real URLs, a designed catalog and detail pages with embedded trailers, sign-in and registration, and silent session refresh. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
+> **Status:** 🚧 In active development. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), LLM-ranked reviews verified across two providers, and personalized recommendations backed by a verified index. The React client is in progress: it has real URLs, a designed catalog and detail pages with embedded trailers, sign-in and registration, silent session refresh, and a protected recommendations page. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
 
 ---
 
@@ -183,6 +183,7 @@ magicstream/
 │       │   ├── AuthProvider.tsx # Loads the user from /api/me; login, register, logout
 │       │   └── useAuth.ts    # Hook for reading auth state in components
 │       ├── components/
+│       │   ├── RequireAuth.tsx # Route guard: redirects signed-out visitors to /login, remembering where they were going
 │       │   ├── Layout.tsx    # Header and navigation shared by every page
 │       │   ├── MovieCard.tsx # Typographic title card for the grid
 │       │   ├── RankingBulbs.tsx # Five marquee bulbs encoding the ranking
@@ -190,10 +191,13 @@ magicstream/
 │       │   ├── LoginForm.tsx
 │       │   └── RegisterForm.tsx
 │       ├── lib/
-│       │   └── ranking.ts    # Ranking value → lit bulbs and display label
+│       │   ├── ranking.ts    # Ranking value → lit bulbs and display label
+│       │   ├── redirect.ts   # Validates the post-login return path (same-site only)
+│       │   └── redirect.test.ts
 │       ├── pages/
 │       │   ├── HomePage.tsx
 │       │   ├── MovieDetailPage.tsx
+│       │   ├── RecommendationsPage.tsx # "For you": protected, empty state with a next step
 │       │   ├── LoginPage.tsx
 │       │   ├── RegisterPage.tsx
 │       │   └── NotFoundPage.tsx
@@ -474,6 +478,18 @@ An iframe runs third-party code inside the page, so the trailer component valida
 
 ### Per-movie state resets by key
 The detail view is rendered with `key={imdbId}`, so moving from one movie to another mounts a fresh component instead of reusing the previous one's state. No earlier movie can flash on screen while the next one loads. Movie IDs from the URL are passed through `encodeURIComponent` so they can only ever form one path segment.
+
+### Client-side route guards are convenience, not security
+`<RequireAuth>` wraps protected pages the way `RequireAuth` middleware wraps protected API routes, but only the server's check is a security boundary: anyone can call the API directly. The guard exists so signed-out visitors are sent to log in instead of seeing a page whose requests would fail, and it redirects before the page renders, so no doomed API request is made. While auth status is still loading it decides nothing.
+
+### Sign-in returns you where you were going
+The guard passes the attempted path to the login page, and a successful login (or registration, if the visitor switches forms on the way) returns there instead of the home page. If a session expires while on a protected page, the next request's refresh fails, the auth context becomes anonymous, and the guard sends the visitor to log in with the page remembered.
+
+### The return path can't become an open redirect
+A `?next=` query parameter on a login URL is a classic phishing vector: an attacker sends a real login link that forwards to their own site afterwards. Here the return path travels in router navigation state, which a link from outside can't set, and it is validated anyway: it must start with `/` but not `//` (browsers treat `//evil.com` as a protocol-relative URL to another site) or `/\` (which some browsers normalize to `//`). Each rule has a test that fails when the rule is removed; deleting only the `//` check fails exactly the protocol-relative case.
+
+### Empty states say what to do next
+A user whose genres have no film ranked Okay or better sees why the page is empty and a link to browse all movies, rather than a blank grid.
 
 ### Provider choice: Groq
 With ranking quality equivalent on the evaluation set, the choice came down to operations. Groq answered in well under a second; Gemini took ~2 seconds per call, hit its free-tier quota (`429`) after about seventeen quick requests, and stalled for several minutes during one session. Both remain one `.env` edit away.
@@ -852,6 +868,34 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | Phone width (461px) | Single column, wrapped header, full-width trailer, no horizontal scroll | ✅ |
 | Console | No warnings from app code after removing redundant `allowfullscreen` | ✅ |
 
+### Phase 5d — Protected recommendations ✅
+
+- `RequireAuth` route guard; "For you" page backed by `GET /api/recommendations`
+- Post-login and post-registration return to the attempted page via router state
+- `returnPath()` validation with table-driven tests; empty state with a next step
+
+**Unit tests** (`npm test`: 14 across two files)
+
+| Test | Expected | Result |
+|---|---|---|
+| Same-site paths, including query strings | Returned unchanged | ✅ |
+| `//evil.com`, `/\evil.com`, `https://evil.com`, `javascript:…`, relative path | Rejected, falls back to `/` | ✅ |
+| Missing or malformed state | Falls back to `/` | ✅ |
+| Mutation: remove the leading-`/` check | 3 tests fail (relative, absolute, `javascript:`) | ✅ |
+| Mutation: remove only the `//` check | Exactly 1 test fails (protocol-relative) | ✅ |
+
+**Browser tests**
+
+| Test | Expected | Result |
+|---|---|---|
+| Visit `/recommendations` signed out | Redirected to `/login` with `from: '/recommendations'` in router state; no `recommendations` API request | ✅ |
+| Log in from that page | Returned to `/recommendations`: Godfather, Shawshank, Interstellar (Drama, Okay or better) | ✅ |
+| Drama + Sci-Fi user | Godfather, Shawshank, Inception, Interstellar; Interstellar once | ✅ |
+| Register a Thriller-only user via the login page | Returned to `/recommendations`; empty state shown (Parasite is ranked Bad) | ✅ |
+| Only the access cookie removed while on the page | `recommendations` 401 → silent refresh → page reloads data; user never notices | ✅ |
+| All site data cleared while on the page | `recommendations` 401 → `refresh` 401 → redirected to `/login`; returned after logging in | ✅ |
+| Log out from the page, then press Back | Redirected to `/login` | ✅ |
+
 ---
 
 ## Roadmap
@@ -863,7 +907,7 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | ✅ |
 | 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | ✅ |
 | 4 | Recommendations by favorite genres, sorted by ranking | ✅ |
-| 5 | React client: browse, auth, trailer player, recommendations, admin review form | 🔨 5a–5c done |
+| 5 | React client: browse, auth, trailer player, recommendations, admin review form | 🔨 5a–5d done |
 | 6 | Deploy: MongoDB Atlas, API on Render, client on Vercel | ⬜ |
 
 ---
