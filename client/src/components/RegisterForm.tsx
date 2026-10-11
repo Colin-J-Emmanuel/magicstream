@@ -57,35 +57,38 @@ export function RegisterForm() {
   }
 
   return (
-    <form onSubmit={handleSubmit}>
-      <h2>Create an account</h2>
-      <label>
+    <form className="form" onSubmit={handleSubmit}>
+      <label className="field">
         First name
         <input required maxLength={50} autoComplete="given-name" value={firstName} onChange={(e) => setFirstName(e.target.value)} />
       </label>
-      <label>
+      <label className="field">
         Last name
         <input required maxLength={50} autoComplete="family-name" value={lastName} onChange={(e) => setLastName(e.target.value)} />
       </label>
-      <label>
+      <label className="field">
         Email
         <input type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} />
       </label>
-      <label>
-        Password (at least 8 characters)
+      <label className="field">
+        Password, at least 8 characters
         <input type="password" required minLength={8} maxLength={72} autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
       </label>
-      <fieldset>
+      <fieldset className="genres">
         <legend>Favorite genres</legend>
         {genres.map((g) => (
-          <label key={g.genre_id}>
+          <label key={g.genre_id} className="check">
             <input type="checkbox" checked={selected.includes(g.genre_id)} onChange={() => toggleGenre(g.genre_id)} />
             {g.genre_name}
           </label>
         ))}
       </fieldset>
-      {error && <p role="alert">{error}</p>}
-      <button type="submit" disabled={submitting}>
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+      <button type="submit" className="button" disabled={submitting}>
         {submitting ? 'Creating account…' : 'Create account'}
       </button>
     </form>

@@ -10,7 +10,7 @@ export function LoginForm() {
   const [submitting, setSubmitting] = useState(false)
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault() // stop the browser's default full-page form submission
+    e.preventDefault()
     setError(null)
     setSubmitting(true)
     try {
@@ -23,18 +23,21 @@ export function LoginForm() {
   }
 
   return (
-    <form onSubmit={handleSubmit}>
-      <h2>Log in</h2>
-      <label>
+    <form className="form" onSubmit={handleSubmit}>
+      <label className="field">
         Email
         <input type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} />
       </label>
-      <label>
+      <label className="field">
         Password
         <input type="password" required autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
       </label>
-      {error && <p role="alert">{error}</p>}
-      <button type="submit" disabled={submitting}>
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+      <button type="submit" className="button" disabled={submitting}>
         {submitting ? 'Logging in…' : 'Log in'}
       </button>
     </form>

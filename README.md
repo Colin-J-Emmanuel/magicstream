@@ -4,7 +4,7 @@ A full-stack movie streaming app with AI-ranked reviews and personalized recomme
 
 **Stack:** Go (Gin) · MongoDB · React · OpenAI-compatible LLM (Groq free tier) · Docker Compose
 
-> **Status:** 🚧 In active development. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), LLM-ranked reviews verified across two providers, and personalized recommendations backed by a verified index. The React client is in progress: it talks to the API through a same-origin proxy and handles sign-in, registration, and silent session refresh. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
+> **Status:** 🚧 In active development. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), LLM-ranked reviews verified across two providers, and personalized recommendations backed by a verified index. The React client is in progress: it has real URLs, a designed catalog and detail pages with embedded trailers, sign-in and registration, and silent session refresh. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
 
 ---
 
@@ -169,11 +169,23 @@ magicstream/
 │       │   ├── AuthProvider.tsx # Loads the user from /api/me; login, register, logout
 │       │   └── useAuth.ts    # Hook for reading auth state in components
 │       ├── components/
+│       │   ├── Layout.tsx    # Header and navigation shared by every page
+│       │   ├── MovieCard.tsx # Typographic title card for the grid
+│       │   ├── RankingBulbs.tsx # Five marquee bulbs encoding the ranking
+│       │   ├── Trailer.tsx   # Validated, sandboxed YouTube embed
 │       │   ├── LoginForm.tsx
-│       │   ├── RegisterForm.tsx
-│       │   └── MovieList.tsx
-│       ├── App.tsx           # Signed-out forms or signed-in view
-│       └── main.tsx          # Root: StrictMode + AuthProvider
+│       │   └── RegisterForm.tsx
+│       ├── lib/
+│       │   └── ranking.ts    # Ranking value → lit bulbs and display label
+│       ├── pages/
+│       │   ├── HomePage.tsx
+│       │   ├── MovieDetailPage.tsx
+│       │   ├── LoginPage.tsx
+│       │   ├── RegisterPage.tsx
+│       │   └── NotFoundPage.tsx
+│       ├── App.tsx           # Route table
+│       ├── index.css         # Design tokens and all styles
+│       └── main.tsx          # Root: StrictMode, router, AuthProvider
 └── server/
     ├── main.go               # Entry point: config, DB connection, indexes, routes
     ├── auth/
@@ -436,6 +448,18 @@ The forms use HTML constraints (`required`, `type="email"`, `minLength`) and a g
 
 ### Genres come from the catalog
 The registration form derives its genre choices from the distinct genres in `/api/movies` instead of a hardcoded list, so it can never offer a genre the database doesn't have. A dedicated endpoint would be the scalable version.
+
+### Visual design: a cinema marquee
+The interface is built around the product's distinctive feature, the editorial ranking, shown as a row of five marquee bulbs (Excellent lights all five, Terrible one, unranked none). It is the one bold element; everything else stays quiet: oxblood "theatre velvet" surfaces rather than the near-black of most streaming apps, brass for lit bulbs and interactive states, and a condensed display face (Big Shoulders Display, drawn from Chicago signage) for titles over Instrument Sans for text. The catalog has no poster images, so cards are typographic title cards rather than placeholder art. The bulbs light in sequence once on the detail page, and only when the visitor hasn't asked their system to reduce motion. Screen readers hear one phrase per ranking ("Ranking: Good"), not five shapes.
+
+### Real URLs with client-side routing
+React Router gives every view an address (`/`, `/movies/:imdbId`, `/login`, `/register`, plus a catch-all), so the back button, bookmarks, and shared links work. Navigation swaps views without reloading the page. Deep links work because the server returns `index.html` for any non-file path (Vite does this in development; the production host will be configured the same way). Signed-in visitors to `/login` or `/register` are redirected home with a history replace, so Back doesn't return them to a form they no longer need.
+
+### The trailer embed is constrained
+An iframe runs third-party code inside the page, so the trailer component validates the YouTube ID against its exact format (11 characters of `[A-Za-z0-9_-]`) before building any URL; a bad value in the database renders "No trailer for this movie yet" instead of an arbitrary address. It embeds from `youtube-nocookie.com`, YouTube's privacy-enhanced domain; uses a `sandbox` that permits only what playback needs (the frame can't navigate the page or submit forms); and sends `strict-origin-when-cross-origin` as its referrer, which YouTube requires to verify embeds without receiving the full page URL. Fullscreen is granted through the `allow` attribute alone; adding the legacy `allowfullscreen` as well produced a browser warning and was removed.
+
+### Per-movie state resets by key
+The detail view is rendered with `key={imdbId}`, so moving from one movie to another mounts a fresh component instead of reusing the previous one's state. No earlier movie can flash on screen while the next one loads. Movie IDs from the URL are passed through `encodeURIComponent` so they can only ever form one path segment.
 
 ### Provider choice: Groq
 With ranking quality equivalent on the evaluation set, the choice came down to operations. Groq answered in well under a second; Gemini took ~2 seconds per call, hit its free-tier quota (`429`) after about seventeen quick requests, and stalled for several minutes during one session. Both remain one `.env` edit away.
@@ -793,6 +817,27 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | Register a duplicate email | `register` 409, message shown, no `login` | ✅ |
 | Logout | `logout` 204; cookies cleared; reload stays signed out | ✅ |
 
+### Phase 5c — Routing, catalog and detail pages, visual design ✅
+
+- React Router with a shared layout, five routes, and signed-in redirects away from the auth pages
+- Home grid of title cards; detail page with trailer and review; designed not-found states
+- Marquee-bulb ranking component; design tokens in `index.css`
+- Sandboxed, ID-validated YouTube embed
+
+| Test | Expected | Result |
+|---|---|---|
+| Home page | Title-card grid; bulbs match each ranking; unranked shows "Awaiting review" | ✅ |
+| Open a movie | URL `/movies/:imdbId`, no full reload; trailer plays; bulbs light in sequence | ✅ |
+| Browser Back | Returns to the grid | ✅ |
+| Deep link, reloaded | `/movies/tt0111161` loads directly | ✅ |
+| `/movies/tt9999999` | "Movie not found" (server 404) | ✅ |
+| `/movies/abc` | "Movie not found" (server 400) | ✅ |
+| `/nope` | "Page not found" | ✅ |
+| `/login` while signed in | Redirected to `/` | ✅ |
+| Keyboard | Tab moves a visible brass focus ring through links and cards | ✅ |
+| Phone width (461px) | Single column, wrapped header, full-width trailer, no horizontal scroll | ✅ |
+| Console | No warnings from app code after removing redundant `allowfullscreen` | ✅ |
+
 ---
 
 ## Roadmap
@@ -804,7 +849,7 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | ✅ |
 | 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | ✅ |
 | 4 | Recommendations by favorite genres, sorted by ranking | ✅ |
-| 5 | React client: browse, auth, trailer player, recommendations, admin review form | 🔨 5a–5b done |
+| 5 | React client: browse, auth, trailer player, recommendations, admin review form | 🔨 5a–5c done |
 | 6 | Deploy: MongoDB Atlas, API on Render, client on Vercel | ⬜ |
 
 ---

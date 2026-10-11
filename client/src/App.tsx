@@ -1,39 +1,21 @@
-import { useState } from 'react'
-import { useAuth } from './auth/useAuth'
-import { LoginForm } from './components/LoginForm'
-import { MovieList } from './components/MovieList'
-import { RegisterForm } from './components/RegisterForm'
+import { Route, Routes } from 'react-router'
+import { Layout } from './components/Layout'
+import { HomePage } from './pages/HomePage'
+import { LoginPage } from './pages/LoginPage'
+import { MovieDetailPage } from './pages/MovieDetailPage'
+import { NotFoundPage } from './pages/NotFoundPage'
+import { RegisterPage } from './pages/RegisterPage'
 
 export default function App() {
-  const { status, user, logout } = useAuth()
-  const [mode, setMode] = useState<'login' | 'register'>('login')
-
-  if (status === 'loading') return <p>Loading…</p>
-
-  if (!user) {
-    return (
-      <main>
-        <h1>MagicStream</h1>
-        {mode === 'login' ? <LoginForm /> : <RegisterForm />}
-        <button type="button" onClick={() => setMode(mode === 'login' ? 'register' : 'login')}>
-          {mode === 'login' ? 'Need an account? Register' : 'Have an account? Log in'}
-        </button>
-      </main>
-    )
-  }
-
   return (
-    <main>
-      <header>
-        <h1>MagicStream</h1>
-        <p>
-          Signed in as {user.first_name} ({user.role})
-        </p>
-        <button type="button" onClick={() => void logout()}>
-          Log out
-        </button>
-      </header>
-      <MovieList />
-    </main>
+    <Routes>
+      <Route element={<Layout />}>
+        <Route index element={<HomePage />} />
+        <Route path="movies/:imdbId" element={<MovieDetailPage />} />
+        <Route path="login" element={<LoginPage />} />
+        <Route path="register" element={<RegisterPage />} />
+        <Route path="*" element={<NotFoundPage />} />
+      </Route>
+    </Routes>
   )
 }
