@@ -84,6 +84,13 @@ func main() {
 
 	api := router.Group("/api") // NEW: every API route below is mounted under /api
 
+	// API responses depend on who is asking (cookies decide what /me and /recommendations
+	// return), so no shared cache, such as a CDN in front of the API, may store them.
+	api.Use(func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		c.Next()
+	})
+
 	movieHandler := handlers.NewMovieHandler(db)
 	api.GET("/movies", movieHandler.List)         // CHANGED: router → api
 	api.GET("/movies/:imdb_id", movieHandler.Get) // CHANGED: router → api
