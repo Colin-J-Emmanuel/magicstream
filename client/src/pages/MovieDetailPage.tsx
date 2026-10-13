@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { api, ApiError, errorMessage } from '../api/client'
 import type { Movie } from '../api/types'
+import { useAuth } from '../auth/useAuth'
 import { RankingBulbs } from '../components/RankingBulbs'
+import { ReviewEditor } from '../components/ReviewEditor'
 import { Trailer } from '../components/Trailer'
 
 export function MovieDetailPage() {
@@ -12,6 +14,7 @@ export function MovieDetailPage() {
 }
 
 function MovieDetail({ imdbId }: { imdbId: string }) {
+  const { user } = useAuth()
   const [movie, setMovie] = useState<Movie | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -51,8 +54,10 @@ function MovieDetail({ imdbId }: { imdbId: string }) {
           <h2 id="review-heading" className="review-heading">
             Our review
           </h2>
-          <RankingBulbs ranking={movie.ranking} size="large" />
+          {/* Keyed by ranking so the bulbs replay their warm-up when a save changes it. */}
+          <RankingBulbs key={movie.ranking.ranking_value} ranking={movie.ranking} size="large" />
           <p className="review-text">{movie.admin_review || 'Not reviewed yet.'}</p>
+          {user?.role === 'ADMIN' && <ReviewEditor movie={movie} onSaved={setMovie} />}
         </section>
       </div>
     </>

@@ -284,7 +284,8 @@ main {
   font-size: 0.9375rem;
 }
 
-.field input {
+.field input,
+.field textarea {
   padding: 0.65rem 0.75rem;
   background: var(--velvet-raised);
   border: 1px solid var(--velvet-edge);
@@ -338,4 +339,40 @@ main {
 .switch {
   margin-top: 1.5rem;
   color: var(--muted);
+}
+
+/* Admin review editor */
+
+.editor {
+  margin-top: 2.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--velvet-edge);
+}
+
+.editor-heading {
+  margin: 0;
+  font: 700 1.25rem/1.1 var(--display);
+}
+
+.field textarea {
+  min-height: 9rem;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.char-count {
+  justify-self: end;
+  margin: -0.5rem 0 0;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.char-count.over {
+  color: var(--danger);
+}
+
+.form-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9375rem;
 }

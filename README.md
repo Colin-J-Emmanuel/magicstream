@@ -4,7 +4,7 @@ A full-stack movie streaming app with AI-ranked reviews and personalized recomme
 
 **Stack:** Go (Gin) · MongoDB · React · OpenAI-compatible LLM (Groq free tier) · Docker Compose
 
-> **Status:** 🚧 In active development. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), LLM-ranked reviews verified across two providers, and personalized recommendations backed by a verified index. The React client is in progress: it has real URLs, a designed catalog and detail pages with embedded trailers, sign-in and registration, silent session refresh, and a protected recommendations page. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
+> **Status:** 🚧 Feature-complete locally; deployment next. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), LLM-ranked reviews verified across two providers, and personalized recommendations backed by a verified index. The React client covers browsing, trailers, sign-in, silent session refresh, a protected recommendations page, and an admin review editor that ranks reviews with the LLM. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
 
 ---
 
@@ -183,6 +183,7 @@ magicstream/
 │       │   ├── AuthProvider.tsx # Loads the user from /api/me; login, register, logout
 │       │   └── useAuth.ts    # Hook for reading auth state in components
 │       ├── components/
+│       │   ├── ReviewEditor.tsx # Admin-only: write a review, rank it with the LLM, update in place
 │       │   ├── RequireAuth.tsx # Route guard: redirects signed-out visitors to /login, remembering where they were going
 │       │   ├── Layout.tsx    # Header and navigation shared by every page
 │       │   ├── MovieCard.tsx # Typographic title card for the grid
@@ -193,7 +194,9 @@ magicstream/
 │       ├── lib/
 │       │   ├── ranking.ts    # Ranking value → lit bulbs and display label
 │       │   ├── redirect.ts   # Validates the post-login return path (same-site only)
-│       │   └── redirect.test.ts
+│       │   ├── redirect.test.ts
+│       │   ├── reviewErrors.ts # Save failures → actionable messages
+│       │   └── reviewErrors.test.ts
 │       ├── pages/
 │       │   ├── HomePage.tsx
 │       │   ├── MovieDetailPage.tsx
@@ -490,6 +493,18 @@ A `?next=` query parameter on a login URL is a classic phishing vector: an attac
 
 ### Empty states say what to do next
 A user whose genres have no film ranked Okay or better sees why the page is empty and a link to browse all movies, rather than a blank grid.
+
+### Admin-only UI hides; the server forbids
+The review editor renders only when the signed-in user's role is `ADMIN`. That is presentation, not protection: a non-admin who sends the same `PATCH` from the browser console receives `403` from the server's role middleware. Tested both ways.
+
+### A failed save never costs the editor their writing
+Ranking calls an external model and can fail. On any failure the text stays in the box, the published review and ranking are untouched (the server writes both in one update only after ranking succeeds), and the message says the review wasn't saved and what to do. Each status gets its own guidance: `502` (unusable model answer) suggests rewording, since ranking is deterministic and retrying identical text gives the same answer; `503` and `504` suggest trying again; `500` (misconfiguration) never suggests retrying. A unit test enforces that every failure message states the review wasn't saved.
+
+### Slow writes show progress; writes aren't cancelled
+While ranking runs, the button reads "Ranking…" and is disabled, which also prevents double submissions; after three seconds a note explains the delay. Unlike reads, the save request is not aborted if the editor navigates away: someone who clicked save expects it to finish.
+
+### Results update in place
+The server returns the updated movie, which replaces the page's state; the ranking bulbs are keyed by ranking value, so their warm-up replays when a save changes the ranking. Saving unchanged text is disabled in the UI, mirroring the server's skip of the model for identical reviews.
 
 ### Provider choice: Groq
 With ranking quality equivalent on the evaluation set, the choice came down to operations. Groq answered in well under a second; Gemini took ~2 seconds per call, hit its free-tier quota (`429`) after about seventeen quick requests, and stalled for several minutes during one session. Both remain one `.env` edit away.
@@ -896,6 +911,26 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | All site data cleared while on the page | `recommendations` 401 → `refresh` 401 → redirected to `/login`; returned after logging in | ✅ |
 | Log out from the page, then press Back | Redirected to `/login` | ✅ |
 
+### Phase 5e — Admin review editor ✅
+
+- `ReviewEditor` on the movie page for admins; `PATCH /api/admin/movies/:imdb_id/review`
+- Status-specific failure messages in a pure, unit-tested function
+- In-place update with bulb replay; progress, slow-request note, double-submit guard; character count matching the server's rule
+
+**Unit tests** (`npm test`: 31 across three files): each failure status maps to actionable guidance; every failure says the review wasn't saved; misconfiguration never suggests retrying ✅
+
+**Browser tests**
+
+| Test | Expected | Result |
+|---|---|---|
+| Non-admin on a movie page | No editor shown | ✅ |
+| Non-admin sends the `PATCH` from the console | `403 Forbidden` | ✅ |
+| Admin reviews an unranked movie | Single `PATCH`; ranked Okay; bulbs replay; "Saved and ranked Okay"; button shows "No changes to save" | ✅ |
+| Change visible elsewhere | Home grid shows the new ranking; an Animation + Crime user's recommendations now include the film | ✅ |
+| Save with the LLM unreachable | `503` message saying the review wasn't saved; edited text kept; published review and ranking unchanged | ✅ |
+| Same text after the provider recovers | Saved on the next click; ranked Good | ✅ |
+| Empty review | `0 / 2000`; save disabled | ✅ |
+
 ---
 
 ## Roadmap
@@ -907,7 +942,7 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | 2 | Auth: registration (bcrypt), login, access/refresh JWTs in http-only cookies, middleware | ✅ |
 | 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | ✅ |
 | 4 | Recommendations by favorite genres, sorted by ranking | ✅ |
-| 5 | React client: browse, auth, trailer player, recommendations, admin review form | 🔨 5a–5d done |
+| 5 | React client: browse, auth, trailer player, recommendations, admin review form | ✅ |
 | 6 | Deploy: MongoDB Atlas, API on Render, client on Vercel | ⬜ |
 
 ---
