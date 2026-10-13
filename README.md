@@ -4,7 +4,9 @@ A full-stack movie streaming app with AI-ranked reviews and personalized recomme
 
 **Stack:** Go (Gin) · MongoDB · React · OpenAI-compatible LLM (Groq free tier) · Docker Compose
 
-> **Status:** 🚧 Feature-complete locally; deployment next. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), LLM-ranked reviews verified across two providers, and personalized recommendations backed by a verified index. The React client covers browsing, trailers, sign-in, silent session refresh, a protected recommendations page, and an admin review editor that ranks reviews with the LLM. See the [Build log](#build-log) for what's done and the [Roadmap](#roadmap) for what's next.
+**Live demo:** [magicstream-eight.vercel.app](https://magicstream-eight.vercel.app) — the API runs on a free tier that sleeps when idle, so the first load can take about a minute.
+
+> **Status:** ✅ Complete and deployed. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), LLM-ranked reviews verified across two providers, and personalized recommendations backed by a verified index. The React client covers browsing, trailers, sign-in, silent session refresh, a protected recommendations page, and an admin review editor that ranks reviews with the LLM. The app runs in production on Vercel, Render, and MongoDB Atlas. See the [Build log](#build-log) for how each piece was built and tested.
 
 ---
 
@@ -25,6 +27,7 @@ A full-stack movie streaming app with AI-ranked reviews and personalized recomme
 - [Architecture](#architecture)
 - [Getting started](#getting-started)
 - [Configuration](#configuration)
+- [Deployment](#deployment)
 - [API](#api)
 - [Project structure](#project-structure)
 - [Design decisions](#design-decisions)
@@ -139,6 +142,42 @@ All configuration is read from environment variables (`server/.env` locally; the
 
 Pin an exact model version rather than an alias like `gemini-flash-latest`, so rankings stay reproducible.
 
+## Deployment
+
+The production setup matches local development: the browser talks to a single origin, and `/api` requests are forwarded to the Go server.
+
+```
+Browser ──▶ magicstream-eight.vercel.app
+               ├── /api/*  ──rewrite──▶ Render (Go API) ──▶ MongoDB Atlas
+               └── /*      ──▶ index.html (React Router handles the path)
+```
+
+| Piece | Service | Settings |
+|---|---|---|
+| Database | MongoDB Atlas, free M0 cluster | AWS `us-east-1`; a dedicated database user with read/write access only; network access open to all IPs (see trade-offs) |
+| API | Render, free web service | Root `server`, build `go build -o app .`, start `./app`, health check `/health`, region Virginia (next to the database) |
+| Client | Vercel | Root `client`, Vite preset, Node 22 (`engines` in `package.json`), `client/vercel.json` for rewrites |
+
+**Render environment:** the nine variables from [Configuration](#configuration), with `COOKIE_SECURE=true` and production-only secrets. No `.env` file is deployed.
+
+**Loading data into Atlas.** godotenv never overrides a variable that is already set in the shell, so the same CLIs work against production by setting `MONGODB_URI` for one command. Reading it from the clipboard keeps the connection string out of shell history and avoids quoting problems with special characters in the password:
+
+```bash
+cd server
+export MONGODB_URI="$(pbpaste)"     # Atlas connection string, copied from a password manager
+go run ./cmd/seed                   # catalog
+go run ./cmd/promote -email you@example.com   # after registering on the live site
+unset MONGODB_URI
+```
+
+**Free-tier trade-offs**
+
+| Trade-off | Why it's acceptable here |
+|---|---|
+| Render spins the API down after 15 idle minutes; the next request waits about a minute | A portfolio demo, not a service with users waiting. A paid instance removes it with no code change |
+| Atlas accepts connections from any IP | Render's free tier has no fixed outbound IPs to allowlist. The connection still requires TLS and a strong, rotated password, and the user can only read and write the app's data |
+| Rankings were written fresh in production | Local reviews weren't copied over; the production admin wrote new ones, ranked by the same model |
+
 ---
 
 ## API
@@ -173,6 +212,7 @@ magicstream/
 ├── .nvmrc                    # Node version for the client (22)
 ├── client/                   # React + TypeScript (Vite)
 │   ├── vite.config.ts        # Dev proxy: /api → Go on :8080
+│   ├── vercel.json           # Production rewrites: /api → Render, everything else → index.html
 │   └── src/
 │       ├── api/
 │       │   ├── client.ts     # Single fetch wrapper: typed results, ApiError, single-flight silent refresh
@@ -441,7 +481,7 @@ Favorite genres are loaded from the database on each request (with a projection 
 The compound index `{genre.genre_id, ranking.ranking_value, title}` puts the filtered field first and the sort fields after it. Because `genre` is an array, it is a multikey index: a movie gets one entry per genre, so a user who likes two of a movie's genres finds it twice during the scan, and MongoDB removes the duplicate. `explain("executionStats")` on a two-genre query showed one `IXSCAN` per genre, merged by a `SORT_MERGE` stage with no in-memory `SORT`, and `docsExamined` equal to `nReturned` (4 of 8 documents read, all 4 returned).
 
 ### One origin in the browser: a proxy instead of CORS
-In development the React dev server runs on `:5173` and Go on `:8080`, which the browser treats as different origins. Rather than configuring CORS, Vite's dev server proxies `/api/*` to Go, so the browser only ever talks to one origin. No CORS configuration exists to get wrong, and the auth cookies remain first-party, so the `SameSite=Lax` settings from Phase 2 work unchanged. Production will use the same shape through a hosting rewrite. This is why every API route lives under `/api`: the prefix is how the proxy tells API calls from client-side pages.
+In development the React dev server runs on `:5173` and Go on `:8080`, which the browser treats as different origins. Rather than configuring CORS, Vite's dev server proxies `/api/*` to Go, so the browser only ever talks to one origin. No CORS configuration exists to get wrong, and the auth cookies remain first-party, so the `SameSite=Lax` settings from Phase 2 work unchanged. Production uses the same shape through a Vercel rewrite (see [Deployment](#deployment)). This is why every API route lives under `/api`: the prefix is how the proxy tells API calls from client-side pages.
 
 ### The frontend never handles tokens
 Requests are same-origin, so the browser attaches the http-only auth cookies automatically. No JavaScript reads, stores, or forwards a token, which keeps the XSS protection from the cookie design intact on the client side.
@@ -508,6 +548,18 @@ The server returns the updated movie, which replaces the page's state; the ranki
 
 ### Provider choice: Groq
 With ranking quality equivalent on the evaluation set, the choice came down to operations. Groq answered in well under a second; Gemini took ~2 seconds per call, hit its free-tier quota (`429`) after about seventeen quick requests, and stalled for several minutes during one session. Both remain one `.env` edit away.
+
+### Production keeps one origin, through a rewrite
+Vercel serves the React build and rewrites `/api/*` to the Render service, playing the part Vite's proxy plays in development. The browser never learns the Render address, so there's still no CORS configuration, and the auth cookies are first-party on `vercel.app`, where `SameSite=Lax` and `Secure` work as designed. A second rule sends every other path to `index.html`, so a deep link like `/movies/tt0111161` loads the app and React Router handles it, instead of returning a host 404.
+
+### No cache may store an API response, enforced in two places
+API responses depend on who is asking: `/api/me` and `/api/recommendations` differ per user. If a shared cache stored one, the next visitor could receive someone else's data. The Go server sets `Cache-Control: no-store` on the whole `/api` group, and `vercel.json` separately turns off caching for rewritten `/api` requests. Either one alone should be enough; having both means one misconfiguration doesn't leak data. `/health` is outside the group and stays cacheable.
+
+### Production has its own secrets
+The JWT secrets and database password in production were generated for production and exist only in Render's settings and a password manager, never in a `.env` file or the repository. When a secret appeared in a screenshot during setup, it was rotated rather than judged harmless. Rotating the JWT secrets has a visible, acceptable cost: every existing session ends and users log in again.
+
+### The database user can't administer the database
+The app's Atlas user has read/write access to data, not the admin role Atlas suggests by default. A leaked connection string could change data but not create users, drop permissions, or reconfigure the cluster.
 
 ---
 
@@ -931,6 +983,69 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | Same text after the provider recovers | Saved on the next click; ranked Good | ✅ |
 | Empty review | `0 / 2000`; save disabled | ✅ |
 
+### Phase 6a — Production readiness ✅
+
+- `Cache-Control: no-store` middleware on the `/api` route group
+- Node pinned to 22 (`engines` in `package.json` and `.nvmrc`) so the host builds with the same version
+- Production build: 86 kB of gzipped JavaScript
+
+| Test | Expected | Result |
+|---|---|---|
+| `GET /api/movies` | `cache-control: no-store` | ✅ |
+| `GET /health` | No `cache-control` header (outside the group) | ✅ |
+| `npm run build` | Clean type-check and build | ✅ |
+
+`curl -I` sends a `HEAD` request, which Gin doesn't route to `GET` handlers, so it returned `404` with no header. Headers were checked with `curl -s -D - -o /dev/null` instead.
+
+### Phase 6b — MongoDB Atlas ✅
+
+- Free M0 cluster in AWS `us-east-1`, created under a personal organization (the university organization didn't offer the free tier)
+- Database user with read/write access; password rotated after it appeared in a screenshot
+- Catalog seeded by pointing the seed CLI at Atlas with a shell variable
+
+| Test | Expected | Result |
+|---|---|---|
+| Seed against Atlas | `8 inserted` | ✅ |
+| Promote with wrong credentials in the connection string | `bad auth: authentication failed`: the network, DNS and TLS all worked, only the credentials were wrong | ✅ |
+| Promote with the working connection string | `… is now ADMIN`, effective at next login | ✅ |
+
+### Phase 6c — API on Render ✅
+
+- Free web service, root `server`, health check `/health`, nine environment variables, `COOKIE_SECURE=true`
+- JWT secrets generated for production only, and rotated after setup
+
+| Test | Expected | Result |
+|---|---|---|
+| `GET /health` | `{"database":"ok","status":"ok"}` from Atlas | ✅ |
+| `GET /api/movies` | 8 movies | ✅ |
+| Response headers | `cache-control: no-store` | ✅ |
+
+### Phase 6d — Client on Vercel ✅
+
+- Single project with root `client`, Vite preset
+- `vercel.json`: `/api/*` rewritten to Render, every other path to `index.html`, rewrite caching disabled for `/api`
+
+| Test | Expected | Result |
+|---|---|---|
+| Home page | 8 movies, all "Awaiting review" (production has no reviews yet) | ✅ |
+| `GET https://magicstream-eight.vercel.app/api/movies` | JSON from Render through the rewrite | ✅ |
+
+### Phase 6e — Production verification ✅
+
+| Test | Expected | Result |
+|---|---|---|
+| Request URL of `movies` in the Network tab | `https://magicstream-eight.vercel.app/api/movies`: same origin, no CORS | ✅ |
+| Response headers | `Cache-Control: no-store` | ✅ |
+| `access_token` cookie | `HttpOnly`, `Secure`, `SameSite=Lax`, Path `/`, on `magicstream-eight.vercel.app` | ✅ |
+| `refresh_token` cookie | `HttpOnly`, `Secure`, `SameSite=Lax`, Path `/api/auth` | ✅ |
+| Hard reload on `/movies/tt0111161` | Page renders; no host 404 | ✅ |
+| Admin writes eight reviews in production, each written to aim at a ranking | All eight ranked as intended: Godfather, Parasite, Shawshank, Spirited Away Excellent; Dark Knight, Inception Good; Interstellar Okay; Pulp Fiction Bad | ✅ |
+| "For you" for a Thriller-only account, Parasite unreviewed | Empty state; `/api/recommendations` returns `[]` | ✅ |
+| `/recommendations` in a private window | Redirected to `/login` | ✅ |
+| Console on first load while signed out | `401` from `/api/me`, then `401` from `/api/auth/refresh`: the expected "not signed in" check, handled by the app | ✅ |
+
+The only other console error is a `404` for a `maxresdefault.webp` thumbnail requested by YouTube's player inside the trailer iframe; it comes from YouTube, not the app.
+
 ---
 
 ## Roadmap
@@ -943,10 +1058,6 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 | 3 | Admin review → LLM ranking, with strict output validation and retry on rate limits | ✅ |
 | 4 | Recommendations by favorite genres, sorted by ranking | ✅ |
 | 5 | React client: browse, auth, trailer player, recommendations, admin review form | ✅ |
-| 6 | Deploy: MongoDB Atlas, API on Render, client on Vercel | ⬜ |
+| 6 | Deploy: MongoDB Atlas, API on Render, client on Vercel | ✅ |
 
 ---
-
-## Author
-
-**Colin Emmanuel** · [GitHub](https://github.com/Colin-J-Emmanuel)
