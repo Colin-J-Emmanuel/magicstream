@@ -1,0 +1,11 @@
+# Files gcloud must not upload when deploying with `gcloud run deploy --source`.
+# .dockerignore filters the image; this filters the upload to Cloud Build,
+# so local secrets never leave this machine.
+.gcloudignore
+.git
+.env
+.env.*
+!.env.example
+
+# Not needed to build the image.
+eval_reviews.txt
