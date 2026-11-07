@@ -1,13 +1,12 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
-    { "source": "/api/:path*", "destination": "https://magicstream-api-es5a.onrender.com/api/:path*" },
+    { "source": "/api/:path*", "destination": "https://magicstream-api-299762406804.us-east4.run.app/api/:path*" },
     { "source": "/(.*)", "destination": "/index.html" }
   ],
   "headers": [
     {
       "source": "/api/:path*",
-      "destination": "https://magicstream-api-299762406804.us-east4.run.app/api/:path*", 
       "headers": [{ "key": "x-vercel-enable-rewrite-caching", "value": "0" }]
     }
   ]
