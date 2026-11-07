@@ -7,6 +7,7 @@
   "headers": [
     {
       "source": "/api/:path*",
+      "destination": "https://magicstream-api-299762406804.us-east4.run.app/api/:path*", 
       "headers": [{ "key": "x-vercel-enable-rewrite-caching", "value": "0" }]
     }
   ]
