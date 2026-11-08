@@ -1107,7 +1107,7 @@ The only other console error is a `404` for a `maxresdefault.webp` thumbnail req
 | Cloud Run URL, `GET /` | `404 page not found`: no route at the root, so the container is up and Gin is answering | ✅ |
 | Cloud Run URL, `GET /health` and `GET /api/movies` | Healthy against Atlas; 8 movies | ✅ |
 | Live site through the Vercel rewrite | Catalog loads from Cloud Run | ✅ |
-| Cold start after 20 idle minutes, `GET /api/movies` through Vercel | About a second, against about a minute on Render | ⏳ |
+| Cold start after 30+ idle minutes, `GET /api/movies` through Vercel (new instance confirmed by its startup log line) | About a second, against about a minute on Render | ✅ 1.18 s cold; 0.14 s warm |
 
 The first Vercel build after the switch failed: the new rewrite had been pasted over the `headers` entry, and Vercel's schema validation rejected `headers[0]` for having a `destination`. Vercel kept serving the previous deployment, so the live site never broke, and the fix restored both blocks.
 
