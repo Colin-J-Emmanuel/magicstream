@@ -2,11 +2,11 @@
 
 A full-stack movie streaming app with AI-ranked reviews and personalized recommendations. Users browse a movie catalog and watch trailers; an admin writes reviews, an LLM classifies each review into a fixed ranking, and users get recommendations from their favorite genres, sorted best-first.
 
-**Stack:** Go (Gin) · MongoDB · React · OpenAI-compatible LLM (Groq free tier) · Docker Compose
+**Stack:** Go (Gin) · MongoDB · React · OpenAI-compatible LLM (Groq free tier) · Docker · Google Cloud Run
 
-**Live demo:** [magicstream-eight.vercel.app](https://magicstream-eight.vercel.app) — the API runs on a free tier that sleeps when idle, so the first load can take about a minute.
+**Live demo:** [magicstream-eight.vercel.app](https://magicstream-eight.vercel.app)
 
-> **Status:** ✅ Complete and deployed. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), LLM-ranked reviews verified across two providers, and personalized recommendations backed by a verified index. The React client covers browsing, trailers, sign-in, silent session refresh, a protected recommendations page, and an admin review editor that ranks reviews with the LLM. The app runs in production on Vercel, Render, and MongoDB Atlas. See the [Build log](#build-log) for how each piece was built and tested.
+> **Status:** ✅ Complete and deployed. The backend is complete and tested: data layer, full authentication (registration, JWT sessions with rotation and revocation, role-based access), LLM-ranked reviews verified across two providers, and personalized recommendations backed by a verified index. The React client covers browsing, trailers, sign-in, silent session refresh, a protected recommendations page, and an admin review editor that ranks reviews with the LLM. The app runs in production on Vercel, Google Cloud Run, and MongoDB Atlas. See the [Build log](#build-log) for how each piece was built and tested.
 
 ---
 
@@ -41,7 +41,7 @@ A full-stack movie streaming app with AI-ranked reviews and personalized recomme
 ```
 ┌──────────────┐   HTTP + http-only cookies   ┌──────────────────┐      ┌───────────┐
 │ React client │ ───────────────────────────▶ │  Go / Gin API    │ ───▶ │  MongoDB  │
-│  (Vercel)    │ ◀─────────────────────────── │  (Render)        │      │  (Atlas)  │
+│  (Vercel)    │ ◀─────────────────────────── │  (Cloud Run)     │      │  (Atlas)  │
 └──────────────┘                              └────────┬─────────┘      └───────────┘
                                                        │ on review write only
                                                        ▼
@@ -123,7 +123,7 @@ All configuration is read from environment variables (`server/.env` locally; the
 |---|---|---|---|
 | `MONGODB_URI` | yes | — | MongoDB connection string |
 | `DATABASE_NAME` | yes | — | Database name (`magicstream`) |
-| `PORT` | no | `8080` | HTTP port (set automatically by Render) |
+| `PORT` | no | `8080` | HTTP port (set automatically by Cloud Run; don't set it there) |
 | `ACCESS_TOKEN_SECRET` | yes | — | Signs access tokens. At least 32 characters |
 | `REFRESH_TOKEN_SECRET` | yes | — | Signs refresh tokens. At least 32 characters, and must differ from the access secret |
 | `COOKIE_SECURE` | no | `false` | Set `true` in production so auth cookies are sent only over HTTPS |
@@ -148,17 +148,35 @@ The production setup matches local development: the browser talks to a single or
 
 ```
 Browser ──▶ magicstream-eight.vercel.app
-               ├── /api/*  ──rewrite──▶ Render (Go API) ──▶ MongoDB Atlas
+               ├── /api/*  ──rewrite──▶ Cloud Run (Go API) ──▶ MongoDB Atlas
                └── /*      ──▶ index.html (React Router handles the path)
 ```
 
 | Piece | Service | Settings |
 |---|---|---|
 | Database | MongoDB Atlas, free M0 cluster | AWS `us-east-1`; a dedicated database user with read/write access only; network access open to all IPs (see trade-offs) |
-| API | Render, free web service | Root `server`, build `go build -o app .`, start `./app`, health check `/health`, region Virginia (next to the database) |
+| API | Google Cloud Run, request-based billing within the free tier | Built from `server/Dockerfile`; region `us-east4` (Northern Virginia, next to the database); 1 vCPU, 256 MiB, startup CPU boost; scales to zero, at most 2 instances; runs as a dedicated service account |
 | Client | Vercel | Root `client`, Vite preset, Node 22 (`engines` in `package.json`), `client/vercel.json` for rewrites |
 
-**Render environment:** the nine variables from [Configuration](#configuration), with `COOKIE_SECURE=true` and production-only secrets. No `.env` file is deployed.
+**Cloud Run environment:** `DATABASE_NAME`, `COOKIE_SECURE=true`, `LLM_BASE_URL` and `LLM_MODEL` are plain environment variables. The four secrets (`MONGODB_URI`, `ACCESS_TOKEN_SECRET`, `REFRESH_TOKEN_SECRET`, `LLM_API_KEY`) live in Secret Manager and are injected at startup. `PORT` is set by Cloud Run. No `.env` file is uploaded or deployed.
+
+**Deploying.** From `server/`, with the gcloud CLI signed in to the project. `--source .` uploads the folder (filtered by `.gcloudignore`), Cloud Build builds the Dockerfile on `linux/amd64`, and the image is stored in Artifact Registry:
+
+```bash
+cd server
+gcloud run deploy magicstream-api \
+  --source . \
+  --region us-east4 \
+  --service-account magicstream-api@<project-id>.iam.gserviceaccount.com \
+  --allow-unauthenticated \
+  --memory 256Mi --cpu 1 \
+  --min-instances 0 --max-instances 2 \
+  --cpu-boost \
+  --set-env-vars DATABASE_NAME=magicstream,COOKIE_SECURE=true,LLM_BASE_URL=https://api.groq.com/openai/v1,LLM_MODEL=openai/gpt-oss-20b \
+  --set-secrets MONGODB_URI=MONGODB_URI:latest,ACCESS_TOKEN_SECRET=ACCESS_TOKEN_SECRET:latest,REFRESH_TOKEN_SECRET=REFRESH_TOKEN_SECRET:latest,LLM_API_KEY=LLM_API_KEY:latest
+```
+
+Later deploys keep these settings, so `gcloud run deploy magicstream-api --source . --region us-east4` is enough.
 
 **Loading data into Atlas.** godotenv never overrides a variable that is already set in the shell, so the same CLIs work against production by setting `MONGODB_URI` for one command. Reading it from the clipboard keeps the connection string out of shell history and avoids quoting problems with special characters in the password:
 
@@ -174,8 +192,9 @@ unset MONGODB_URI
 
 | Trade-off | Why it's acceptable here |
 |---|---|
-| Render spins the API down after 15 idle minutes; the next request waits about a minute | A portfolio demo, not a service with users waiting. A paid instance removes it with no code change |
-| Atlas accepts connections from any IP | Render's free tier has no fixed outbound IPs to allowlist. The connection still requires TLS and a strong, rotated password, and the user can only read and write the app's data |
+| Cloud Run scales the API to zero when idle; the next request waits for a container to start | A static Go binary on a distroless image starts in well under a second; the wait is seconds, not the minute Render's free tier took (see [Hosting: from Render to Cloud Run](#hosting-from-render-to-cloud-run)). `--min-instances 1` removes it at a cost |
+| Deploys are manual | Render redeployed on every push to `main`; here a deploy is one `gcloud run deploy` command. A Cloud Build trigger can restore push-to-deploy |
+| Atlas accepts connections from any IP | Cloud Run has no fixed outbound IP without a paid Cloud NAT gateway, so there is nothing stable to allowlist. The connection still requires TLS and a strong, rotated password, and the user can only read and write the app's data |
 | Rankings were written fresh in production | Local reviews weren't copied over; the production admin wrote new ones, ranked by the same model |
 
 ---
@@ -212,7 +231,7 @@ magicstream/
 ├── .nvmrc                    # Node version for the client (22)
 ├── client/                   # React + TypeScript (Vite)
 │   ├── vite.config.ts        # Dev proxy: /api → Go on :8080
-│   ├── vercel.json           # Production rewrites: /api → Render, everything else → index.html
+│   ├── vercel.json           # Production rewrites: /api → Cloud Run, everything else → index.html
 │   └── src/
 │       ├── api/
 │       │   ├── client.ts     # Single fetch wrapper: typed results, ApiError, single-flight silent refresh
@@ -248,6 +267,9 @@ magicstream/
 │       ├── index.css         # Design tokens and all styles
 │       └── main.tsx          # Root: StrictMode, router, AuthProvider
 └── server/
+    ├── Dockerfile            # Two-stage build: static Go binary on distroless, non-root
+    ├── .dockerignore         # Keeps .env and local files out of the image
+    ├── .gcloudignore         # Keeps .env and local files out of the Cloud Build upload
     ├── main.go               # Entry point: config, DB connection, indexes, routes
     ├── auth/
     │   ├── tokens.go         # JWT issuing and verification, separate access/refresh secrets
@@ -307,7 +329,7 @@ The LLM ranks a review once, when the admin saves it, and the result is stored. 
 Errors are wrapped at each layer with `fmt.Errorf("...: %w", err)`, so a single log line traces the failure to its root cause, e.g. `database connection failed: pinging mongo: context deadline exceeded ... connection refused`.
 
 ### No trusted proxies by default
-`router.SetTrustedProxies(nil)` stops Gin from trusting `X-Forwarded-For` headers from arbitrary clients, which would let a client spoof its IP. This will be revisited for production, where the API sits behind Render's proxy.
+`router.SetTrustedProxies(nil)` stops Gin from trusting `X-Forwarded-For` headers from arbitrary clients, which would let a client spoof its IP. Production traffic reaches the API through Vercel's rewrite and Google's front end, so client IPs in the logs are the proxy's; trusting a specific proxy header is deferred until something actually needs the real client IP.
 
 ### `imdb_id` is the natural key, enforced by a unique index
 MongoDB assigns every document an `_id`, but a movie's real-world identity is its IMDb ID. A unique index on `imdb_id` makes duplicate movies impossible at the database level, regardless of application code. Index creation runs on every startup and is idempotent: creating an index that already exists with the same definition is a no-op, so no separate migration step is needed.
@@ -550,13 +572,37 @@ The server returns the updated movie, which replaces the page's state; the ranki
 With ranking quality equivalent on the evaluation set, the choice came down to operations. Groq answered in well under a second; Gemini took ~2 seconds per call, hit its free-tier quota (`429`) after about seventeen quick requests, and stalled for several minutes during one session. Both remain one `.env` edit away.
 
 ### Production keeps one origin, through a rewrite
-Vercel serves the React build and rewrites `/api/*` to the Render service, playing the part Vite's proxy plays in development. The browser never learns the Render address, so there's still no CORS configuration, and the auth cookies are first-party on `vercel.app`, where `SameSite=Lax` and `Secure` work as designed. A second rule sends every other path to `index.html`, so a deep link like `/movies/tt0111161` loads the app and React Router handles it, instead of returning a host 404.
+Vercel serves the React build and rewrites `/api/*` to the Cloud Run service, playing the part Vite's proxy plays in development. The browser never learns the API's address, so there's still no CORS configuration, and the auth cookies are first-party on `vercel.app`, where `SameSite=Lax` and `Secure` work as designed. A second rule sends every other path to `index.html`, so a deep link like `/movies/tt0111161` loads the app and React Router handles it, instead of returning a host 404.
 
 ### No cache may store an API response, enforced in two places
 API responses depend on who is asking: `/api/me` and `/api/recommendations` differ per user. If a shared cache stored one, the next visitor could receive someone else's data. The Go server sets `Cache-Control: no-store` on the whole `/api` group, and `vercel.json` separately turns off caching for rewritten `/api` requests. Either one alone should be enough; having both means one misconfiguration doesn't leak data. `/health` is outside the group and stays cacheable.
 
 ### Production has its own secrets
-The JWT secrets and database password in production were generated for production and exist only in Render's settings and a password manager, never in a `.env` file or the repository. When a secret appeared in a screenshot during setup, it was rotated rather than judged harmless. Rotating the JWT secrets has a visible, acceptable cost: every existing session ends and users log in again.
+The JWT secrets and database password in production were generated for production and exist only in the host's secret store and a password manager, never in a `.env` file or the repository. When a secret appeared in a screenshot during setup, it was rotated rather than judged harmless. Rotating the JWT secrets has a visible, acceptable cost: every existing session ends and users log in again. The same secrets moved from Render to Cloud Run unchanged, so the migration logged nobody out.
+
+### Secrets in Secret Manager, read by a dedicated service account
+On Cloud Run the four secrets are stored in Secret Manager rather than as plain environment variables, so they don't appear in the service's configuration, and each has its own access policy. The service runs as `magicstream-api`, a service account created for it with one permission: reading those four secrets. The default Compute Engine account Cloud Run would otherwise use has Editor rights over the whole project, so a compromised container could have done far more. Secret values were created from the clipboard (`pbpaste | tr -d '\n' | gcloud secrets create …`), keeping them out of shell history; stripping the newline matters, because a trailing newline in the connection string breaks it.
+
+### The image carries only the binary
+The Dockerfile compiles a static binary (`CGO_ENABLED=0`) in a Go image and copies only that binary into `distroless/static`, which has no shell or package manager and runs as a non-root user. It still includes CA certificates, which TLS to Atlas and the LLM provider needs. `GIN_MODE=release` is set in the image, so production can't start in debug mode.
+
+### Two ignore files, because there are two uploads
+`.dockerignore` controls what goes into the image; `.gcloudignore` controls what `gcloud run deploy --source` uploads to Cloud Build in the first place. Without the second, a local `.env` or a curl cookie jar would leave the machine even though the image never contained them. Both exclude `.env*` (except `.env.example`) and `cookies.txt`.
+
+### Hosting: from Render to Cloud Run
+Render was the first host for the API. It had a free web service with no card required, built Go natively from the repository with no Dockerfile, redeployed on every push, and offered a Virginia region next to the database. Its cost was cold starts: a free service spins down after 15 idle minutes, and the next request waits about a minute while it spins back up. For a portfolio demo that cost lands in the worst place, because someone opening the link is usually its first visitor in a while.
+
+The options considered, and why each was or wasn't chosen:
+
+| Option | Outcome |
+|---|---|
+| Keep Render and ping `/health` every 10 minutes | No migration, but one always-awake service uses essentially all of the 750 free instance hours per month, and Render may still restart free services at any time |
+| Koyeb | The free instance still scales to zero after an hour, needs a card since early 2026, and the company's acquisition makes the free tier's future uncertain |
+| Railway | No ongoing free tier, only a small monthly credit |
+| Northflank | Its free tier is always on, which removes cold starts entirely. Rejected during setup: its status page reported a security incident in which secrets stored in its control plane were decrypted, with the investigation still open, and this service's secrets would have lived there |
+| Google Cloud Run | Chosen. It also scales to zero, but a small static Go binary starts in about a second, so the wait drops from about a minute to seconds. The free tier covers this traffic many times over. It needs a card, so a $1 budget alert and a 2-instance cap bound the cost |
+
+The lesson was that the requirement wasn't really "never sleeps" but "wakes fast", and that shifted the comparison toward platforms whose cold start is a container start rather than a whole service restart. The app needed no code changes: it already read `PORT` and ran without a `.env` file, so the move was a Dockerfile, two ignore files, and one line in `vercel.json`.
 
 ### The database user can't administer the database
 The app's Atlas user has read/write access to data, not the admin role Atlas suggests by default. A leaked connection string could change data but not create users, drop permissions, or reconfigure the cluster.
@@ -1046,6 +1092,25 @@ Each phase is decomposed into individually tested bricks. Every brick is verifie
 
 The only other console error is a `404` for a `maxresdefault.webp` thumbnail requested by YouTube's player inside the trailer iframe; it comes from YouTube, not the app.
 
+### Phase 6f — API moved to Google Cloud Run ✅
+
+- `server/Dockerfile` (two-stage, distroless, non-root, `GIN_MODE=release`), `.dockerignore`, and `.gcloudignore`
+- Google Cloud project with a $1 budget alert; Cloud Run, Cloud Build, Artifact Registry and Secret Manager enabled
+- Four secrets in Secret Manager, readable only by a dedicated `magicstream-api` service account
+- Service in `us-east4`, deployed with `gcloud run deploy --source`; `vercel.json` rewrite switched from Render to the Cloud Run URL
+
+| Test | Expected | Result |
+|---|---|---|
+| `docker build` locally | Image builds | ✅ |
+| Container against local MongoDB, `GET /health` | `{"database":"ok","status":"ok"}` | ✅ 15.69ms |
+| Container log on start | `no .env file found`: config came from the environment, not a file baked into the image | ✅ |
+| Cloud Run URL, `GET /` | `404 page not found`: no route at the root, so the container is up and Gin is answering | ✅ |
+| Cloud Run URL, `GET /health` and `GET /api/movies` | Healthy against Atlas; 8 movies | ✅ |
+| Live site through the Vercel rewrite | Catalog loads from Cloud Run | ✅ |
+| Cold start after 20 idle minutes, `GET /api/movies` through Vercel | About a second, against about a minute on Render | ⏳ |
+
+The first Vercel build after the switch failed: the new rewrite had been pasted over the `headers` entry, and Vercel's schema validation rejected `headers[0]` for having a `destination`. Vercel kept serving the previous deployment, so the live site never broke, and the fix restored both blocks.
+
 ---
 
 ## Roadmap
@@ -1059,5 +1124,6 @@ The only other console error is a `404` for a `maxresdefault.webp` thumbnail req
 | 4 | Recommendations by favorite genres, sorted by ranking | ✅ |
 | 5 | React client: browse, auth, trailer player, recommendations, admin review form | ✅ |
 | 6 | Deploy: MongoDB Atlas, API on Render, client on Vercel | ✅ |
+| 6f | Move the API from Render to Google Cloud Run | ✅ |
 
 ---

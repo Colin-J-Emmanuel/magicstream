@@ -9,3 +9,4 @@
 
 # Not needed to build the image.
 eval_reviews.txt
+cookies.txt

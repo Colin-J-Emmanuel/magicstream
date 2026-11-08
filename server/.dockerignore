@@ -7,3 +7,4 @@
 # Not needed at runtime.
 eval_reviews.txt
 *_test.go
+cookies.txt
